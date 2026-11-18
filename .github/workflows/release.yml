@@ -28,9 +28,15 @@ jobs:
     with:
       test: true
       package: true
+  linux-aarch64:
+    if: github.repository == 'Villagers654/Venture'
+    uses: ./.github/workflows/linux-aarch64.yml
+    with:
+      test: true
+      package: true
 
   publish:
-    needs: [windows, linux]
+    needs: [windows, linux, linux-aarch64]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

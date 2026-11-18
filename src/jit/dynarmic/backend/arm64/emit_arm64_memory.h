@@ -32,5 +32,11 @@ template<std::size_t bitsize>
 void EmitWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst);
 template<std::size_t bitsize>
 void EmitExclusiveWriteMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst);
+/// A64 LSE atomics: native acquire-release LSE on the fastmem path, the
+/// UserCallbacks::MemoryAtomic* callbacks otherwise or on a fault.
+template<std::size_t bitsize>
+void EmitAtomicMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst);
+template<std::size_t bitsize>
+void EmitCompareAndSwapMemory(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst);
 
 }  // namespace Dynarmic::Backend::Arm64

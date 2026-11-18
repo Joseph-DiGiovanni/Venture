@@ -229,7 +229,10 @@ bool process_resident_memory(ProcessResidentMemory& out) {
   return true;
 }
 namespace {
-__attribute__((target("cx16"))) bool cas128(GuestAddr p, const void* value, const void* expected) {
+#if defined(__x86_64__)
+__attribute__((target("cx16")))
+#endif
+bool cas128(GuestAddr p, const void* value, const void* expected) {
   unsigned __int128 v, e;
   std::memcpy(&v, value, 16); std::memcpy(&e, expected, 16);
   return __sync_bool_compare_and_swap(g2h<unsigned __int128>(p), e, v);
@@ -237,11 +240,82 @@ __attribute__((target("cx16"))) bool cas128(GuestAddr p, const void* value, cons
 int protection(std::uint32_t p) {
   return ((p & (kProtRead | kProtExec)) ? PROT_READ : 0) | ((p & kProtWrite) ? PROT_WRITE : 0);
 }
+#if defined(__aarch64__)
+// Guest-visible addresses stay below 2^47 (core/address_space.cpp). A 48-bit-VA
+// arm64 kernel places mmap(nullptr) just below 2^48, so such a host mapping
+// takes a fixed address counted down from 2^47 instead. Nothing else maps
+// there: the PIE image, brk, the stack and default mmaps lie above it, and the
+// runtime's fixed arenas lie below kLowPlacementFloor.
+constexpr std::uintptr_t kGuestVaLimit = 1ull << 47, kLowPlacementFloor = 0x200000000000ull;
+std::atomic<std::uintptr_t> low_placement_top{kGuestVaLimit};
+std::atomic<bool> kernel_places_high{false};
+void* map_fixed_new(std::uintptr_t address, std::size_t size, int prot, int flags, int fd, off_t offset) {
+  auto* p = mmap(reinterpret_cast<void*>(address), size, prot, flags | MAP_FIXED_NOREPLACE, fd, offset);
+  if (p != MAP_FAILED && p != reinterpret_cast<void*>(address)) {  // a kernel without NOREPLACE
+    munmap(p, size); errno = EEXIST; return MAP_FAILED;
+  }
+  return p;
 }
-std::uint64_t reservation_granularity() { return 4096; }
+// The highest hole in [kLowPlacementFloor, ceiling) that holds size bytes.
+std::uintptr_t low_placement_hole(std::size_t size, std::uintptr_t ceiling) {
+  std::ifstream maps("/proc/self/maps");
+  std::string line;
+  std::uintptr_t cursor = kLowPlacementFloor, best = 0;
+  while (std::getline(maps, line) && cursor < ceiling) {
+    unsigned long long start{}, end{};
+    if (std::sscanf(line.c_str(), "%llx-%llx", &start, &end) != 2 || end <= cursor) continue;
+    const auto stop = std::min<std::uintptr_t>(start, ceiling);
+    if (stop > cursor && stop - cursor >= size) best = stop - size;
+    cursor = std::max<std::uintptr_t>(cursor, end);
+  }
+  if (cursor < ceiling && ceiling - cursor >= size) best = ceiling - size;
+  return best;
+}
+// mmap for memory that becomes guest-visible: like mmap(hint, ...), but the
+// mapping always ends at or below 2^47.
+void* map_guest_visible(std::uintptr_t hint, std::size_t size, int prot, int flags, int fd, off_t offset) {
+  if (hint || !kernel_places_high.load(std::memory_order_relaxed)) {
+    auto* p = mmap(reinterpret_cast<void*>(hint), size, prot, flags, fd, offset);
+    if (p == MAP_FAILED || reinterpret_cast<std::uintptr_t>(p) + size <= kGuestVaLimit) return p;
+    munmap(p, size);
+    if (!hint) kernel_places_high.store(true, std::memory_order_relaxed);
+  }
+  const std::uintptr_t length = align_up(size, kGuestPageSize);
+  if (!length || length > kGuestVaLimit - kLowPlacementFloor) { errno = ENOMEM; return MAP_FAILED; }
+  // Top-down: just below the previous placement while that has room, else the
+  // highest hole /proc/self/maps shows (unmapped views leave holes). A taken
+  // or unusable candidate lowers the search ceiling below it.
+  const auto top = low_placement_top.load();
+  auto ceiling = top - kLowPlacementFloor >= length ? top : kGuestVaLimit;
+  std::uintptr_t at = ceiling == top ? top - length : 0;
+  for (int attempt = 0; attempt < 8; ++attempt) {
+    if (!at && !(at = low_placement_hole(length, ceiling))) break;
+    auto* p = map_fixed_new(at, size, prot, flags, fd, offset);
+    if (p != MAP_FAILED) {
+      for (auto t = low_placement_top.load(); at < t && !low_placement_top.compare_exchange_weak(t, at);) {}
+      return p;
+    }
+    if (errno != EEXIST && errno != ENOMEM) return p;
+    ceiling = at;
+    at = 0;
+  }
+  errno = ENOMEM; return MAP_FAILED;
+}
+#else
+void* map_guest_visible(std::uintptr_t hint, std::size_t size, int prot, int flags, int fd, off_t offset) {
+  return mmap(reinterpret_cast<void*>(hint), size, prot, flags, fd, offset);
+}
+#endif
+}
+// The host page size equals kGuestPageSize: pre_reserve_low_memory refuses to
+// start on any other.
+std::uint64_t reservation_granularity() {
+  static const auto page = static_cast<std::uint64_t>(sysconf(_SC_PAGESIZE));
+  return page;
+}
 GuestAddr reserve(GuestAddr address, std::uint64_t size, bool exact) {
-  auto p = mmap(g2h(address), size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS |
-                (exact ? MAP_FIXED_NOREPLACE : 0), -1, 0);
+  auto p = exact ? mmap(g2h(address), size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0)
+                 : map_guest_visible(address, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
   return p == MAP_FAILED ? 0 : h2g(p);
 }
 void release(GuestAddr address, std::uint64_t size) { munmap(g2h(address), size); }
@@ -251,7 +325,7 @@ bool decommit(GuestAddr address, std::uint64_t size) {
 }
 bool protect(GuestAddr address, std::uint64_t size, std::uint32_t prot) { return mprotect(g2h(address), size, protection(prot)) == 0; }
 int map_shared_file(int fd, std::uint64_t offset, std::uint64_t size, std::uint32_t prot, FileMapping& out) {
-  auto* view = mmap(nullptr, size, protection(prot), MAP_SHARED, fd, static_cast<off_t>(offset));
+  auto* view = map_guest_visible(0, size, protection(prot), MAP_SHARED, fd, static_cast<off_t>(offset));
   if (view == MAP_FAILED) {
     switch (errno) { case EACCES: return -err::kEACCES; case EBADF: return -err::kEBADF;
       case EINVAL: return -err::kEINVAL; default: return -err::kENOMEM; }
@@ -262,7 +336,7 @@ void unmap_shared_file(const FileMapping& mapping) { munmap(g2h(mapping.base), m
 int sync_shared_file(GuestAddr address, std::uint64_t size, bool synchronous) {
   return msync(g2h(address), size, synchronous ? MS_SYNC : MS_ASYNC) == 0 ? 0 : -err::kEIO;
 }
-#if defined(__linux__) && defined(__x86_64__)
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
 namespace {
 bool guarded_access_ready();
 bool guarded_read(GuestAddr address, void* out, std::size_t size);
@@ -270,7 +344,7 @@ bool guarded_read(GuestAddr address, void* out, std::size_t size);
 #endif
 bool read_memory(GuestAddr address, void* out, std::size_t size) {
   if (address + size < address) return false;
-#if defined(__linux__) && defined(__x86_64__)
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
   // As on Windows, a naturally aligned 1, 2, 4 or 8-byte read is one load of
   // that width (ARMv8 single-copy atomicity); process_vm_readv promises none.
   if (size && size <= 8 && !(size & (size - 1)) && !(address & (size - 1)) && guarded_access_ready())
@@ -288,9 +362,15 @@ bool read_memory(GuestAddr address, void* out, std::size_t size) {
 }
 bool write_memory(GuestAddr address, const void* data, std::size_t size) {
   if (address + size < address) return false;
+#if defined(__linux__) && defined(__aarch64__)
+  // A fault-contained copy, like read_memory: no system call per write, and
+  // qemu-user (used to test arm64 builds) has no process_vm_writev.
+  if (guarded_access_ready()) return guarded_store(address, data, size);
+#endif
   iovec local{const_cast<void*>(data), size}, remote{g2h(address), size};
   return process_vm_writev(getpid(), &local, 1, &remote, 1, 0) == static_cast<ssize_t>(size);
 }
+#if !defined(__linux__) || !defined(__aarch64__)
 bool memory_accessible(GuestAddr address, std::size_t size, bool write) {
   if (address + size < address) return false;
   std::ifstream maps("/proc/self/maps");
@@ -308,6 +388,7 @@ bool memory_accessible(GuestAddr address, std::size_t size, bool write) {
   }
   return cursor >= address + size;
 }
+#endif
 bool compare_exchange(GuestAddr address, const void* value, void* expected, std::size_t size) {
   if (address & (size - 1)) return false;
   // Callback path is used only after fastmem faults. Never dereference a bad address.
@@ -323,15 +404,17 @@ bool compare_exchange(GuestAddr address, const void* value, void* expected, std:
 }
 }
 
-#if defined(__linux__) && defined(__x86_64__)
+#if defined(__linux__) && (defined(__x86_64__) || defined(__aarch64__))
 #include <csignal>
 #include <ucontext.h>
 #include <csetjmp>
+#if defined(__x86_64__)
 // System V AMD64 calling convention: rdi, rsi, rdx, rcx.
 #define VENTURE_A0 "%rdi"
 #define VENTURE_A1 "%rsi"
 #define VENTURE_A2 "%rdx"
 #define VENTURE_A3 "%rcx"
+#endif
 #include "platform/guarded_atomics.inc"
 
 namespace venture::platform {
@@ -343,20 +426,62 @@ struct NativeMemoryScope {
 };
 thread_local NativeMemoryScope* native_memory_scope = nullptr;
 struct sigaction previous_segv{}, previous_bus{};
+struct FaultAccess { bool write, execute; };
+#if defined(__x86_64__)
+std::optional<FaultAccess> fault_access(const mcontext_t& machine) {
+  // Page-fault error code: bit 1 write, bit 4 instruction fetch.
+  return FaultAccess{(machine.gregs[REG_ERR] & 2) != 0, (machine.gregs[REG_ERR] & 16) != 0};
+}
+#else
+// The kernel's esr_context record among the __reserved signal frame records
+// (arch/arm64/include/uapi/asm/sigcontext.h). <asm/sigcontext.h> conflicts
+// with glibc's struct sigcontext, so the layout is read here directly:
+// {u32 magic, u32 size} headers, terminated by a zero header.
+std::optional<FaultAccess> fault_access(const mcontext_t& machine) {
+  constexpr std::uint32_t esr_magic = 0x45535201;
+  const auto* record = machine.__reserved;
+  const auto* end = record + sizeof(machine.__reserved);
+  while (end - record >= 8) {
+    std::uint32_t magic, size;
+    std::memcpy(&magic, record, 4); std::memcpy(&size, record + 4, 4);
+    if (!magic || size < 8 || size > static_cast<std::size_t>(end - record)) break;
+    if (magic == esr_magic && size >= 16) {
+      std::uint64_t esr;
+      std::memcpy(&esr, record + 8, 8);
+      // EC 0x24/0x25 data abort (WnR bit 6), 0x20/0x21 instruction abort.
+      switch (esr >> 26) {
+        case 0x24: case 0x25: return FaultAccess{((esr >> 6) & 1) != 0, false};
+        case 0x20: case 0x21: return FaultAccess{false, true};
+        default: return std::nullopt;
+      }
+    }
+    record += size;
+  }
+  return std::nullopt;
+}
+#endif
 // Installed on first use, so it runs before (and chains to) handlers installed
 // earlier, such as Dynarmic's fastmem handler.
 void guarded_fault(int signal, siginfo_t* info, void* raw_context) {
-  auto& rip = static_cast<ucontext_t*>(raw_context)->uc_mcontext.gregs[REG_RIP];
-  if (guarded_ip(static_cast<std::uintptr_t>(rip))) {
-    rip = reinterpret_cast<greg_t>(venture_guarded_fault);
+  auto* context = static_cast<ucontext_t*>(raw_context);
+#if defined(__x86_64__)
+  auto& pc = context->uc_mcontext.gregs[REG_RIP];
+#else
+  auto& pc = context->uc_mcontext.pc;
+#endif
+  if (guarded_ip(static_cast<std::uintptr_t>(pc))) {
+    pc = static_cast<std::remove_reference_t<decltype(pc)>>(reinterpret_cast<std::uintptr_t>(venture_guarded_fault));
     return;
   }
   if (auto* scope = native_memory_scope; scope && info->si_code > 0) {
-    const auto& machine = static_cast<ucontext_t*>(raw_context)->uc_mcontext;
-    const bool write = (machine.gregs[REG_ERR] & 2) != 0;
-    const bool execute = (machine.gregs[REG_ERR] & 16) != 0;
-    if (!execute && native_fault_matches(scope->call, h2g(info->si_addr), write)) {
-      scope->fault_address = h2g(info->si_addr); scope->fault_write = write;
+    const auto address = h2g(info->si_addr);
+    // Without an ESR record the access kind follows the declared buffer the
+    // address falls in, a source read first.
+    const auto access = fault_access(context->uc_mcontext)
+        .value_or(FaultAccess{!native_fault_matches(scope->call, address, false), false});
+    const bool write = access.write;
+    if (!access.execute && native_fault_matches(scope->call, address, write)) {
+      scope->fault_address = address; scope->fault_write = write;
       scope->fault_bus = signal == SIGBUS;
       // sigsetjmp(..., 0) avoids a mask-query syscall on every successful CRT
       // call. Restore the interrupted mask only on this fault path.
@@ -402,6 +527,24 @@ bool native_memory(NativeMemoryOp op, GuestAddr destination, GuestAddr source, s
   native_memory_scope = scope.previous;
   result = scope.call.result; return true;
 }
+#if defined(__aarch64__)
+// One guarded access per page: no system call, and a fault is recognised by
+// its PC, so the answer holds even where the reported fault address is not
+// usable (qemu-user on an x86-64 host reports zero above 2^47). A write probe
+// adds zero atomically, so a concurrent writer loses nothing.
+bool memory_accessible(GuestAddr address, std::size_t size, bool write) {
+  if (address + size < address || !guarded_access_ready()) return false;
+  if (!size) return true;
+  const auto last = align_down(address + size - 1, kGuestPageSize);
+  for (auto page = align_down(address, kGuestPageSize);; page += kGuestPageSize) {
+    auto* at = g2h(std::max(page, address));
+    std::uint64_t old;
+    std::uint8_t byte;
+    if (!(write ? venture_guarded_add1(at, 0, &old) : venture_guarded_read(&byte, at, 1))) return false;
+    if (page == last) return true;
+  }
+}
+#endif
 bool guarded_access_ip(std::uintptr_t ip) { return guarded_ip(ip); }
 }
 #else

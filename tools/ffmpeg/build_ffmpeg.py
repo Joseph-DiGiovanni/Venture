@@ -27,7 +27,11 @@ COMPONENTS = {'CONFIG_AAC_DECODER', 'CONFIG_H264_DECODER', 'CONFIG_HEVC_DECODER'
 if os.name == 'nt':
     COMPONENTS |= {'CONFIG_'+codec+'_'+entry+'_HWACCEL' for codec in ('H264','HEVC','VP9')
                    for entry in ('D3D11VA','D3D11VA2')}
-BASE = bootstrap.TOOLCHAINS / ('ffmpeg-' + sys.platform + '-x64-' + LOCK_HASH)
+# --arch aarch64 cross-builds for Linux aarch64 (Steam Frame) against the
+# tools/linux-baseline/aarch64_sysroot.py sysroot, linked as .deps/ffmpeg-aarch64.
+ARCH = 'x64'
+BASE = bootstrap.TOOLCHAINS / ('ffmpeg-' + sys.platform + '-' + ARCH + '-' + LOCK_HASH)
+SYSROOT = ROOT / '.deps' / 'sysroot-aarch64'
 
 
 def validate_cache(base):
@@ -73,7 +77,7 @@ def provision(rebuild=False):
             validate_cache(BASE)
         except (OSError, ValueError, KeyError, RuntimeError) as error:
             raise RuntimeError('Invalid FFmpeg cache; run python tools/bootstrap.py --ffmpeg: ' + str(error)) from error
-        link = bootstrap.DEPS / 'ffmpeg'
+        link = bootstrap.DEPS / ('ffmpeg' if ARCH == 'x64' else 'ffmpeg-' + ARCH)
         bootstrap.DEPS.mkdir(parents=True, exist_ok=True)
         if os.path.lexists(link):
             if link.is_symlink() or link.is_junction():
@@ -256,6 +260,21 @@ def build_dependency():
             raise RuntimeError('Cannot resolve the configure shell for GNU Make')
         make_flags = ['SHELL='+buffer.value.replace('\\', '/')]
         make = str(tools/'mingw32-make.exe')
+    elif ARCH == 'aarch64':
+        # The sysroot is linked beside the build tree so configure's embedded
+        # arguments stay relative, as in the native build.
+        sysroot_link = BASE / 'sysroot'
+        if not sysroot_link.exists():
+            bootstrap.junction(sysroot_link, SYSROOT.resolve())
+        if not (sysroot_link / 'PACKAGES').is_file():
+            raise RuntimeError('aarch64 sysroot missing: run tools/linux-baseline/aarch64_sysroot.py')
+        flags += ['--enable-cross-compile', '--arch=aarch64', '--target-os=linux', '--sysroot=../sysroot',
+                  '--cc=clang', '--cxx=clang++', '--host-cc=clang', '--nm=llvm-nm', '--ar=llvm-ar',
+                  '--ranlib=llvm-ranlib', '--strip=llvm-strip',
+                  '--extra-cflags=--target=aarch64-linux-gnu', '--extra-cxxflags=--target=aarch64-linux-gnu',
+                  '--extra-ldflags=--target=aarch64-linux-gnu -fuse-ld=lld']
+        make = 'make'
+        bash = 'bash'
     else:
         flags += ['--cc=clang', '--cxx=clang++', '--host-cc=clang']
         make = 'make'
@@ -311,4 +330,11 @@ def build_dependency():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--rebuild', action='store_true')
-    provision(parser.parse_args().rebuild)
+    parser.add_argument('--arch', choices=('x64', 'aarch64'), default='x64',
+                        help='aarch64: Linux cross build against the aarch64 baseline sysroot')
+    arguments = parser.parse_args()
+    if arguments.arch != 'x64' and os.name == 'nt':
+        parser.error('--arch aarch64 is a Linux cross build')
+    ARCH = arguments.arch
+    BASE = bootstrap.TOOLCHAINS / ('ffmpeg-' + sys.platform + '-' + ARCH + '-' + LOCK_HASH)
+    provision(arguments.rebuild)

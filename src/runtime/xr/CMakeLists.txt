@@ -93,7 +93,7 @@ foreach(color_shader IN ITEMS vert frag ms_frag passthrough_frag passthrough_ms_
   endif()
   add_custom_command(OUTPUT ${color_generated}/color_${color_shader}.inc
     COMMAND ${CMAKE_COMMAND} -E make_directory ${color_generated}
-    COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0
+    COMMAND glslang-standalone -V --target-env vulkan1.0
       ${color_defines} ${CMAKE_CURRENT_SOURCE_DIR}/${color_source}
       -o ${color_generated}/color_${color_shader}.spv
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py

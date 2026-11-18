@@ -118,6 +118,34 @@ struct Jit::Impl final {
         return {};
     }
 
+    const void* CodeCacheBegin() const {
+        return A32Core::CodeCacheBegin(current_address_space);
+    }
+
+    std::size_t CodeCacheSize() const {
+        return conf.code_cache_size;
+    }
+
+    bool Precompile(u64 value) {
+        if (jit_interface->is_executing)
+            return false;
+        PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&halt_reason)));
+        const IR::LocationDescriptor descriptor{value};
+        if (current_address_space.Get(descriptor))
+            return true;
+        // Do not evict demand-compiled blocks to warm a speculative descriptor.
+        if (A32Core::CodeCacheRemaining(current_address_space) < 4 * 1024 * 1024)
+            return false;
+        try {
+            current_address_space.GetOrEmit(descriptor);
+        } catch (...) {
+            // Run services this invalidation before executing any block.
+            ClearCache();
+            throw;
+        }
+        return true;
+    }
+
 private:
     void PerformRequestedCacheInvalidation(HaltReason hr) {
         if (Has(hr, HaltReason::CacheInvalidation)) {
@@ -226,6 +254,18 @@ void Jit::ClearExclusiveState() {
 
 std::string Jit::Disassemble() const {
     return impl->Disassemble();
+}
+
+const void* Jit::CodeCacheBegin() const {
+    return impl->CodeCacheBegin();
+}
+
+std::size_t Jit::CodeCacheSize() const {
+    return impl->CodeCacheSize();
+}
+
+bool Jit::Precompile(std::uint64_t descriptor) {
+    return impl->Precompile(descriptor);
 }
 
 }  // namespace Dynarmic::A32

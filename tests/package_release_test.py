@@ -51,7 +51,23 @@ assert set(media_recipe["components"]) == COMPONENTS
 assert hashlib.sha256((layout / "licenses/ffmpeg/ffmpeg-8.1.3.tar.xz").read_bytes()).hexdigest() == media_recipe["recipe"]["sha256"]
 assert (layout / "licenses/ffmpeg/ffmpeg-8.1.3.tar.xz.asc").is_file()
 assert (layout / "licenses/venture/0BSD.txt").read_bytes() == (ROOT / "LICENSES/0BSD.txt").read_bytes()
-assert (layout / "licenses/xbyak/COPYRIGHT").read_bytes() == (ROOT / "src/jit/xbyak/COPYRIGHT").read_bytes()
+# The JIT's emitter for the layout's architecture, and every native file built for it.
+arch = "x86_64" if os.name == "nt" else release.elf_machine(layout / "venture-runtime")
+if arch == "aarch64":
+    assert (layout / "licenses/oaknut/LICENSE").is_file()
+    assert not (layout / "licenses/xbyak").exists()
+else:
+    assert (layout / "licenses/xbyak/COPYRIGHT").read_bytes() == (ROOT / "src/jit/xbyak/COPYRIGHT").read_bytes()
+if os.name != "nt":
+    assert arch in release.LINUX_LAYOUTS
+    for name in ("venture", "java/jdk/lib/server/libjvm.so", "libGLESv2.so", "libavcodec.so.62", "libsqlite3.so.0"):
+        assert release.elf_machine(layout / name) == arch, name
+    try:
+        release.check_elf_machines(layout, "aarch64" if arch == "x86_64" else "x86_64")
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("ELF check accepted another architecture's layout")
 for component in ("fmt", "mcl", "robin_map"):
     assert (layout / "licenses" / component / "LICENSE").is_file()
 probes = Path(tempfile.mkdtemp(prefix="release-scan-", dir=layout.parent))

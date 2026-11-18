@@ -1,31 +1,47 @@
-# Venture's JIT: A32/A64 frontends, IR passes and the x64 backend.
+# Venture's JIT: A32/A64 frontends, IR passes and the host backend: x64
+# (Windows/Linux PCs) or arm64 (Linux aarch64, e.g. the Steam Frame).
 # Its libraries are pinned in cmake/Dependencies.cmake; xbyak (with Venture's
-# dual-mapped code buffer support) lives in src/jit/xbyak.
+# dual-mapped code buffer support) lives in src/jit/xbyak; the arm64 backend
+# emits through oaknut.
 # Boost comes from the pinned header checkout (cmake/Dependencies.cmake), found
 # through the FindBoost module.
 cmake_policy(SET CMP0167 OLD)
 find_package(Boost 1.87 REQUIRED)
 
-if(NOT CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64|x64")
-  message(FATAL_ERROR "Venture's JIT currently targets x64 hosts")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "AMD64|amd64|x86_64|x64")
+  set(VENTURE_JIT_HOST x64)
+elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  set(VENTURE_JIT_HOST arm64)
+else()
+  message(FATAL_ERROR "Venture's JIT targets x64 and arm64 hosts")
 endif()
+set(VENTURE_JIT_HOST ${VENTURE_JIT_HOST} PARENT_SCOPE)
 
 set(FMT_INSTALL OFF CACHE BOOL "" FORCE)
 set(TSL_ROBIN_MAP_ENABLE_INSTALL ON CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(fmt mcl robin_map)
-add_library(venture_jit_xbyak INTERFACE)
-target_include_directories(venture_jit_xbyak SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
-add_library(xbyak::xbyak ALIAS venture_jit_xbyak)
+if(VENTURE_JIT_HOST STREQUAL "x64")
+  add_library(venture_jit_xbyak INTERFACE)
+  target_include_directories(venture_jit_xbyak SYSTEM INTERFACE "${CMAKE_CURRENT_SOURCE_DIR}")
+  add_library(xbyak::xbyak ALIAS venture_jit_xbyak)
+else()
+  FetchContent_MakeAvailable(oaknut)
+endif()
 
-# The platform exception wrapper selects its corresponding x64 file.
+# The platform exception wrapper selects its corresponding backend file.
 file(GLOB_RECURSE portable_sources CONFIGURE_DEPENDS
   dynarmic/common/*.cpp dynarmic/frontend/*.cpp dynarmic/ir/*.cpp)
-list(FILTER portable_sources EXCLUDE REGEX "spin_lock_(arm64|riscv64|loongarch64)\\.cpp$")
+list(FILTER portable_sources EXCLUDE REGEX "spin_lock_(riscv64|loongarch64)\\.cpp$")
+if(VENTURE_JIT_HOST STREQUAL "x64")
+  list(FILTER portable_sources EXCLUDE REGEX "spin_lock_arm64\\.cpp$")
+else()
+  list(FILTER portable_sources EXCLUDE REGEX "spin_lock_x64\\.cpp$")
+endif()
 # The A64 translator includes its implementation files into one translation unit.
 list(FILTER portable_sources EXCLUDE REGEX "/frontend/A64/translate/impl/.*\\.cpp$")
-file(GLOB x64_sources CONFIGURE_DEPENDS dynarmic/backend/x64/*.cpp)
-list(FILTER x64_sources EXCLUDE REGEX "exception_handler_windows\\.cpp$")
-add_library(dynarmic STATIC ${portable_sources} ${x64_sources}
+file(GLOB backend_sources CONFIGURE_DEPENDS dynarmic/backend/${VENTURE_JIT_HOST}/*.cpp)
+list(FILTER backend_sources EXCLUDE REGEX "exception_handler_windows\\.cpp$")
+add_library(dynarmic STATIC ${portable_sources} ${backend_sources}
   dynarmic/backend/block_range_information.cpp)
 if(WIN32)
   target_sources(dynarmic PRIVATE dynarmic/backend/exception_handler_windows.cpp)
@@ -34,12 +50,18 @@ else()
 endif()
 target_include_directories(dynarmic SYSTEM PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/compat)
-target_link_libraries(dynarmic PUBLIC fmt::fmt Boost::boost xbyak::xbyak venture_common PRIVATE merry::mcl)
 target_compile_features(dynarmic PUBLIC cxx_std_23)
 target_compile_definitions(dynarmic PRIVATE
-  ARCHITECTURE_x86_64=1 DYNARMIC_ENABLE_CPU_FEATURE_DETECTION=1
-  DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT=1 FMT_USE_USER_DEFINED_LITERALS=1
-  XBYAK_STRICT_CHECK_MEM_REG_SIZE=0 XBYAK_OLD_DISP_CHECK=1)
+  DYNARMIC_ENABLE_NO_EXECUTE_SUPPORT=1 FMT_USE_USER_DEFINED_LITERALS=1)
+if(VENTURE_JIT_HOST STREQUAL "x64")
+  target_link_libraries(dynarmic PUBLIC fmt::fmt Boost::boost xbyak::xbyak venture_common PRIVATE merry::mcl)
+  target_compile_definitions(dynarmic PRIVATE
+    ARCHITECTURE_x86_64=1 DYNARMIC_ENABLE_CPU_FEATURE_DETECTION=1
+    XBYAK_STRICT_CHECK_MEM_REG_SIZE=0 XBYAK_OLD_DISP_CHECK=1)
+else()
+  target_link_libraries(dynarmic PUBLIC fmt::fmt Boost::boost merry::oaknut venture_common PRIVATE merry::mcl)
+  target_compile_definitions(dynarmic PRIVATE ARCHITECTURE_arm64=1)
+endif()
 if(WIN32)
   target_compile_definitions(dynarmic PRIVATE FMT_USE_WINDOWS_H=0)
 endif()
@@ -56,12 +78,21 @@ if(VENTURE_BUILD_TESTS)
   FetchContent_MakeAvailable(catch2 oaknut)
   file(GLOB fp_tests CONFIGURE_DEPENDS tests/fp/*.cpp)
   add_executable(venture_dynarmic_tests ${fp_tests}
-    tests/decoder_tests.cpp tests/x64_cpu_info.cpp
+    tests/decoder_tests.cpp
     tests/A32/test_arm_instructions.cpp tests/A32/test_thumb_instructions.cpp
     tests/A32/test_coprocessor.cpp tests/A32/test_svc.cpp
     tests/A64/a64.cpp tests/A64/fibonacci.cpp tests/A64/fp_min_max.cpp
     tests/A64/misaligned_page_table.cpp tests/A64/test_invalidation.cpp
-    tests/A64/real_world.cpp tests/A64/portable_blocks.cpp tests/A64/translate_any.cpp tests/A64/code_allocation.cpp tests/native/preserve_xmm.cpp)
+    tests/A64/real_world.cpp tests/A64/translate_any.cpp)
+  if(VENTURE_JIT_HOST STREQUAL "x64")
+    # Backend internals: x64 code allocation, portable x64 blocks and host register preservation.
+    target_sources(venture_dynarmic_tests PRIVATE tests/x64_cpu_info.cpp
+      tests/A64/portable_blocks.cpp tests/A64/code_allocation.cpp tests/native/preserve_xmm.cpp)
+  endif()
+  if(VENTURE_JIT_HOST STREQUAL "arm64")
+    # arm64 backend: LSE atomics, fast SVCs, host FP environment, precise aborts.
+    target_sources(venture_dynarmic_tests PRIVATE tests/A64/arm64_backend.cpp)
+  endif()
   target_link_libraries(venture_dynarmic_tests PRIVATE dynarmic Catch2::Catch2WithMain merry::oaknut merry::mcl)
   if(WIN32)
     target_link_options(venture_dynarmic_tests PRIVATE -municode)

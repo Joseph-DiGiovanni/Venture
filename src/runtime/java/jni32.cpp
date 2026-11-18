@@ -408,21 +408,13 @@ bool special(JNIEnv* env, hle::CallContext& c) {
   return false;
 }
 
-hle::a32::CallBuilder32 native_arguments(const Descriptor& d, const HostArguments& host, HostAbi abi,
+hle::a32::CallBuilder32 native_arguments(const Descriptor& d, const HostRegisters& host, HostAbi abi,
                                          GuestAddr env, bool critical) {
   hle::a32::CallBuilder32 out;
   if (!critical) out.pointer(env).value(reference(g2h<_jobject>(host.gp[1])));
-  unsigned gp = 2, simd = 0, position = 2, stack = 0;
+  HostSlots slots(abi);
   for (auto type : d.parameters) {
-    bool fp = type == Type::Float || type == Type::Double;
-    std::uint64_t bits;
-    if (abi == HostAbi::Win64) {
-      bits = position < 4 ? (fp ? host.fp[position] : host.gp[position]) : host.stack[position - 4];
-      ++position;
-    } else if (fp)
-      bits = simd < 8 ? host.fp[simd++] : host.stack[stack++];
-    else
-      bits = gp < 6 ? host.gp[gp++] : host.stack[stack++];
+    std::uint64_t bits = host_value(host, slots.next(type));
     using K = hle::a32::Kind;
     K kind = K::U32;
     switch (type) {

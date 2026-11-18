@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cerrno>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <exception>
 #include <mutex>
@@ -80,6 +81,13 @@ bool a32_identity_fastmem_safe() noexcept {
   });
 }
 void pre_reserve_low_memory() noexcept {
+  // Guest mappings are host mappings with 4 KiB protection granularity; a
+  // 16 or 64 KiB page kernel cannot express them.
+  if (const auto page = sysconf(_SC_PAGESIZE); page != static_cast<long>(kGuestPageSize)) {
+    std::fprintf(stderr, "Venture requires a Linux kernel with %zu-byte pages; this kernel uses %ld-byte pages.\n",
+                 kGuestPageSize, page);
+    std::_Exit(1);
+  }
   std::lock_guard lock(reservation_mutex);
   if (reservation_attempted) return;
   reservation_attempted = true;

@@ -33,6 +33,8 @@ constexpr std::size_t spill_slot_size = sizeof(decltype(StackLayout::spill)::val
 static bool IsValuelessType(IR::Type type) {
     switch (type) {
     case IR::Type::Table:
+    // An A64ColdSet* record names its (possibly void) memory access.
+    case IR::Type::Void:
         return true;
     default:
         return false;
@@ -85,6 +87,10 @@ IR::AccType Argument::GetImmediateAccType() const {
 
 HostLoc::Kind Argument::CurrentLocationKind(RegAlloc& reg_alloc) const {
     return reg_alloc.ValueLocation(value.GetInst())->kind;
+}
+
+std::optional<HostLoc> RegAlloc::ArgumentLocation(const Argument& arg) const {
+    return ValueLocation(arg.value.GetInst());
 }
 
 bool HostLocInfo::Contains(const IR::Inst* value) const {

@@ -10,7 +10,9 @@
 
 #include <array>
 #include <cstddef>
+#include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "common/common_types.h"
@@ -25,6 +27,10 @@ namespace oaknut {
 struct CodeGenerator;
 struct Label;
 }  // namespace oaknut
+
+namespace Dynarmic {
+class ExclusiveMonitor;
+}  // namespace Dynarmic
 
 namespace Dynarmic::FP {
 class FPCR;
@@ -76,7 +82,33 @@ enum class LinkTarget {
     ExclusiveWriteMemory32,
     ExclusiveWriteMemory64,
     ExclusiveWriteMemory128,
+    // MemoryWriteExclusive* outside the global monitor (inline exclusives): vaddr in
+    // Xscratch0, value in Xscratch1, expected in D0; Xscratch0 = 1 on success. The 128-bit
+    // form is plain: vaddr in X1, value in Q0, expected in Q1; W0 = 1 on success.
+    WrappedCompareWriteMemory8,
+    WrappedCompareWriteMemory16,
+    WrappedCompareWriteMemory32,
+    WrappedCompareWriteMemory64,
+    CompareWriteMemory128,
+    // { this, vaddr }; vaddr in Xscratch0, value or expected in Xscratch1, AtomicOp or
+    // desired in D0. Caller-saved registers other than Xscratch0 (the result) are kept.
+    WrappedAtomicMemory8,
+    WrappedAtomicMemory16,
+    WrappedAtomicMemory32,
+    WrappedAtomicMemory64,
+    WrappedCompareAndSwapMemory8,
+    WrappedCompareAndSwapMemory16,
+    WrappedCompareAndSwapMemory32,
+    WrappedCompareAndSwapMemory64,
+    // { this, vaddr in X1, expected in Q0, desired in Q1 } -> Q0
+    CompareAndSwapMemory128,
+    // Plain CallSVC and the fast forms with the host FP environment.
     CallSVC,
+    CallSVCFastHostFp,
+    CallSVCFastKnownHostFp,
+    // Fast forms that keep the guest FP environment live.
+    CallSVCFast,
+    CallSVCFastKnown,
     ExceptionRaised,
     InstructionSynchronizationBarrierRaised,
     InstructionCacheOperationRaised,
@@ -84,6 +116,8 @@ enum class LinkTarget {
     GetCNTPCT,
     AddTicks,
     GetTicksRemaining,
+    // A64 UserConfig::diagnostic_entry.record: { user, pc in X1, state in X2 }, host FP environment.
+    DiagnosticEntry,
 };
 
 struct Relocation {
@@ -143,9 +177,26 @@ struct EmitConfig {
     std::size_t fastmem_address_space_bits;
     bool silently_mirror_fastmem;
 
+    // Exclusives: UserConfig::fastmem_exclusive_access and related options
+    ExclusiveMonitor* global_monitor;
+    std::size_t processor_id;
+    bool fastmem_exclusive_access;
+    bool elide_unchanged_exclusive_stores;
+    bool recompile_on_exclusive_fastmem_failure;
+
     // Timing
     bool wall_clock_cntpct;
     bool enable_cycle_counting;
+    // A64: forward links within a halt-polling window may skip the halt poll.
+    bool enable_bounded_halt_polling;
+
+    // Supervisor calls (A64/A32::UserConfig::svc_*).
+    std::optional<u32> svc_fast;
+    std::optional<u32> svc_fp_transfer;
+    std::optional<u32> svc_fp_guest;
+    std::function<const void*(u64, u32)> svc_lookup;
+    // A64: guest PC of a block whose entry calls LinkTarget::DiagnosticEntry, if selected.
+    std::function<std::optional<u64>(const IR::LocationDescriptor&)> diagnostic_entry;
 
     // Endianness
     bool always_little_endian;

@@ -19,7 +19,11 @@
 #include "platform/memory.h"
 #include "platform/process_info.h"
 #include <dynarmic/interface/A64/a64.h>
+#if defined(__aarch64__)
+#include <dynarmic/backend/arm64/a64_jitstate.h>
+#else
 #include <dynarmic/backend/x64/a64_jitstate.h>
+#endif
 #include <dynarmic/interface/exclusive_monitor.h>
 #include <dynarmic/interface/profiling.h>
 #include <algorithm>
@@ -38,6 +42,14 @@ namespace {
 using Dynarmic::HaltReason;
 using Dynarmic::A64::VAddr;
 using Dynarmic::A64::Vector;
+// The host backend's jitstate, passed to CallSVCFastKnown and diagnostic_entry.record.
+#if defined(__aarch64__)
+using JitState = Dynarmic::Backend::Arm64::A64JitState;
+std::uint32_t jit_state_pstate(const JitState& state) { return state.cpsr_nzcv; }
+#else
+using JitState = Dynarmic::Backend::X64::A64JitState;
+std::uint32_t jit_state_pstate(const JitState& state) { return state.GetPstate(); }
+#endif
 class DynarmicCpu;
 class Backend final : public CpuBackend {
  public:
@@ -111,10 +123,12 @@ class DynarmicCpu final : public Cpu, private Dynarmic::A64::UserCallbacks {
     if (const auto* elision = environment::getenv("VENTURE_JIT_EXCLUSIVE_ELISION"); !elision || std::string_view(elision) != "0")
       config.elide_unchanged_exclusive_stores = true;
     config.check_halt_on_memory_access = true;
+#if !defined(__aarch64__)
     // Diagnostics: VENTURE_JIT_DISABLED_HOST_FEATURES=<mask> hides host ISA extensions
     // (dynarmic HostFeature bits, e.g. 0xfe0 for every AVX-512 subset) from the emitter.
     if (const auto* mask = environment::getenv("VENTURE_JIT_DISABLED_HOST_FEATURES"))
       config.disabled_host_features = static_cast<std::uint32_t>(std::strtoul(mask, nullptr, 0));
+#endif
     // Registers overwritten later in a block reach JitState only on an access's
     // abort exit, with the same values precise stores would hold (Live, default;
     // exp-jit-02 North Star -0.75%, Batman -0.6% main). off restores precise
@@ -166,9 +180,14 @@ class DynarmicCpu final : public Cpu, private Dynarmic::A64::UserCallbacks {
       config.optimizations |= Dynarmic::OptimizationFlag::Unsafe_ReducedErrorFP;
     config.tpidr_el0 = &tp_;
     config.tpidrro_el0 = &tpro_;
+#if defined(__aarch64__)
+    // arm64 blocks branch to the prelude trampolines, which B/BL reach within 128 MiB.
+    config.code_cache_size = 128 * 1024 * 1024;
+#else
     // Keep load-time translations when the busiest thread exceeds 128 MiB.
     // This is a bounded reservation; the section commits pages only on emission.
     config.code_cache_size = 256 * 1024 * 1024;
+#endif
     config.code_allocation_failed = alloc_failure::jit_code_refused;
     config.cntfrq_el0 = 1'000'000'000;
     config.ctr_el0 = 0x8444c004;  // 64-byte instruction/data lines.
@@ -248,14 +267,15 @@ class DynarmicCpu final : public Cpu, private Dynarmic::A64::UserCallbacks {
       config.diagnostic_entry.selected = [](VAddr pc) { return pc_trace::selection().contains(pc); };
       config.diagnostic_entry.user = this;
       config.diagnostic_entry.record = [](void* user, VAddr pc, const void* raw) noexcept {
-        const auto& state=*static_cast<const Dynarmic::Backend::X64::A64JitState*>(raw);
+        const auto& state=*static_cast<const JitState*>(raw);
         const auto slot=static_cast<DynarmicCpu*>(user)->pc_observer_slot_;
-        pc_trace::record(slot,pc,state.sp,state.GetPstate(),state.reg,
+        pc_trace::record(slot,pc,state.sp,jit_state_pstate(state),state.reg,
                          platform::profile_thread_id(),api_result_trace::now());
       };
       config.nzcv_exit_liveness = false;
       config.inline_outlined_atomics = false;
     }
+#if !defined(__aarch64__)  // Portable blocks are x64 machine code (cpu/portable_cache.cpp).
     if (auto* blocks = PortableBlockCache::get()) {
       // Every block a guest thread translates or installs seeds background translation of its successors.
       config.portable_block_sink = [blocks](std::uint64_t descriptor, const std::uint8_t* data, std::size_t size) {
@@ -270,6 +290,7 @@ class DynarmicCpu final : public Cpu, private Dynarmic::A64::UserCallbacks {
         return found;
       };
     }
+#endif
     jit_bits_ = config.fast_dispatch_table_bits;
     jit_ = std::make_unique<Dynarmic::A64::Jit>(config);
     cache_begin_ = reinterpret_cast<std::uintptr_t>(jit_->CodeCacheBegin());
@@ -305,7 +326,10 @@ class DynarmicCpu final : public Cpu, private Dynarmic::A64::UserCallbacks {
   }
   void request_halt() override { external_halt_.store(true); jit_->HaltExecution(HaltReason::UserDefined2); }
   JitBlockList detach_jit_hints() noexcept override { return std::exchange(block_list_, JitBlockList{}); }
-  bool pretranslate(std::uint64_t descriptor) noexcept override {
+  bool pretranslate([[maybe_unused]] std::uint64_t descriptor) noexcept override {
+#if defined(__aarch64__)
+    return false;  // Background translation only fills the x64 portable block cache.
+#else
     invalidations_->enter([&](GuestAddr p, std::uint64_t n) { jit_->InvalidateCacheRange(p, n); });
     struct Leave { DynarmicCpu* cpu; ~Leave() { cpu->acknowledge_stop(); } } leave{this};
     try {
@@ -317,6 +341,7 @@ class DynarmicCpu final : public Cpu, private Dynarmic::A64::UserCallbacks {
     } catch (...) {
       return false;  // Precompile has requested a clear; the next call performs it.
     }
+#endif
   }
   void set_thread_name(std::string_view name) override { if (hints_) block_list_.name(name, false); }
   void idle(const std::function<bool()>& stop) noexcept override {
@@ -395,7 +420,9 @@ class DynarmicCpu final : public Cpu, private Dynarmic::A64::UserCallbacks {
   unsigned jit_bits_ = 0;
   std::array<std::uint64_t, 16> outlined_counts_{};
   std::uint64_t tp_{}, tpro_{};
+#if !defined(__aarch64__)
   std::vector<std::uint8_t> portable_buffer_;  // the last cached block found (portable_block_source)
+#endif
   std::unique_ptr<Dynarmic::A64::Jit> jit_;
   std::uintptr_t cache_begin_ = 0, cache_end_ = 0;
   std::optional<CpuExit> exit_;
@@ -409,7 +436,9 @@ class DynarmicCpu final : public Cpu, private Dynarmic::A64::UserCallbacks {
   std::uint64_t idle_hints_ = 0;
   std::int64_t idle_ns_ = 0;
   bool hints_reserved_ = false;
+#if !defined(__aarch64__)
   std::uint64_t pretranslated_ = 0;
+#endif
   void acknowledge_stop() { invalidations_->leave(); }
   // VENTURE_JIT_DISPATCH_CENSUS=1: cumulative per-thread dispatch and callback counts.
   struct Census {
@@ -572,7 +601,7 @@ class DynarmicCpu final : public Cpu, private Dynarmic::A64::UserCallbacks {
   }
   void CallSVCFastKnown(std::uint32_t immediate, const void* metadata, void* state) override {
     svc_ = immediate;
-    auto& registers = *static_cast<Dynarmic::Backend::X64::A64JitState*>(state);
+    auto& registers = *static_cast<JitState*>(state);
     if (hle::GuestFpScope fp(immediate == kSvcHleCallFastGuestFp);
         dispatch_hle_in_jit(*static_cast<const hle::FunctionInfo*>(metadata), hle::Registers(registers.reg.data())))
       return;

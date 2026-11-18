@@ -1312,13 +1312,20 @@ TEST_CASE("updates pick this platform's release file and its checksum") {
   using namespace venture::launcher;
   const auto release = Json::parse(R"({"assets": [
     {"name": "SHA256SUMS", "size": 300, "browser_download_url": "https://github.com/Villagers654/Venture/releases/download/v9/SHA256SUMS"},
+    {"name": "Venture-9-linux-aarch64.AppImage", "size": 6, "browser_download_url": "https://github.com/Villagers654/Venture/releases/download/v9/Venture-9-linux-aarch64.AppImage"},
     {"name": "Venture-9-linux-x86_64.AppImage", "size": 7, "browser_download_url": "https://github.com/Villagers654/Venture/releases/download/v9/Venture-9-linux-x86_64.AppImage"},
     {"name": "Venture-windows64-setup.exe", "size": 9, "browser_download_url": "https://evil.example/Venture-windows64-setup.exe"},
     {"name": "Venture-windows64.zip", "size": 8, "browser_download_url": "https://github.com/Villagers654/Venture/releases/download/v9/Venture-windows64.zip"}]})");
+  // The AppImage of this machine's architecture.
   const auto image = update::pick(release, update::Method::appimage);
   REQUIRE(image);
+#if defined(__aarch64__)
+  CHECK(image->name == "Venture-9-linux-aarch64.AppImage");
+  CHECK(image->size == 6);
+#else
   CHECK(image->name == "Venture-9-linux-x86_64.AppImage");
   CHECK(image->size == 7);
+#endif
   // Only GitHub serves Venture's releases.
   CHECK_FALSE(update::pick(release, update::Method::installer));
   CHECK_FALSE(update::pick(release, update::Method::page));

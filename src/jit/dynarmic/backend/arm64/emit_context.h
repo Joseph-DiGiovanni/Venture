@@ -7,7 +7,10 @@
 
 #include <functional>
 #include <memory>
+#include <optional>
 #include <vector>
+
+#include "common/container/unordered_map.h"
 
 #include <oaknut/oaknut.hpp>
 
@@ -32,6 +35,15 @@ inline SharedLabel GenSharedLabel() {
     return std::make_shared<oaknut::Label>();
 }
 
+// A register value a memory access's abort exit stores (A64ColdSet*). The location is
+// the value's after the access, where the abort exit leaves.
+struct ColdStateStore {
+    IR::Opcode opcode;
+    std::size_t index;
+    std::optional<HostLoc> location;  // nullopt: immediate
+    u64 immediate;
+};
+
 struct EmitContext {
     IR::Block& block;
     RegAlloc& reg_alloc;
@@ -41,6 +53,9 @@ struct EmitContext {
     FastmemManager& fastmem;
 
     std::vector<std::function<void()>> deferred_emits;
+    // Keyed by the access. Complete once the block's instructions are emitted, before
+    // the deferred emits that hold the abort exits.
+    ::Common::unordered_map<const IR::Inst*, std::vector<ColdStateStore>> cold_state{};
 
     FP::FPCR FPCR(bool fpcr_controlled = true) const {
         const FP::FPCR fpcr = conf.descriptor_to_fpcr(block.Location());

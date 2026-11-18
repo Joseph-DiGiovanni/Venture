@@ -323,14 +323,22 @@ GuestCallResult GuestThread::call64(GuestAddr fn, const GuestCallArgs& args) {
 void GuestThread::run_until_return(int depth) {
   // Guest FP status lives in the CPU. Keep the surrounding host environment
   // separate across the entire guest call, including its slow HLE dispatches.
-  // Clearing inherited host flags once also avoids needless MXCSR changes on
-  // each integer-only JIT exit/re-entry.
+  // Clearing inherited host flags once also avoids needless MXCSR/FPSR changes
+  // on each integer-only JIT exit/re-entry.
 #if defined(__SSE__) || defined(_M_X64)
   const unsigned host_mxcsr = _mm_getcsr();
   _mm_setcsr(host_mxcsr & ~0x3fu);
   try { (this->*run_impl_)(depth); }
   catch (...) { _mm_setcsr(host_mxcsr); throw; }
   _mm_setcsr(host_mxcsr);
+#elif defined(__aarch64__)
+  // FPSR cumulative flags: QC (27), IDC (7), IXC/UFC/OFC/DZC/IOC (4:0).
+  std::uint64_t host_fpsr;
+  asm volatile("mrs %0, fpsr" : "=r"(host_fpsr));
+  asm volatile("msr fpsr, %0" :: "r"(host_fpsr & ~0x0800009full) : "memory");
+  try { (this->*run_impl_)(depth); }
+  catch (...) { asm volatile("msr fpsr, %0" :: "r"(host_fpsr) : "memory"); throw; }
+  asm volatile("msr fpsr, %0" :: "r"(host_fpsr) : "memory");
 #else
   (this->*run_impl_)(depth);
 #endif

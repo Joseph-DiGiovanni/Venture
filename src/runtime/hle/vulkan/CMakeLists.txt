@@ -54,8 +54,9 @@ else()
 endif()
 target_compile_definitions(venture_vulkan PUBLIC VK_NO_PROTOTYPES)
 
-# Build the shader compiler with the same llvm-mingw toolchain. No SDK install
-# and no prebuilt compiler binary is required.
+# Build the shader compiler with the same toolchain. No SDK install and no
+# prebuilt compiler binary is required. COMMANDs name the target itself, so a
+# cross build runs it through CMAKE_CROSSCOMPILING_EMULATOR (SPIR-V is host-neutral).
 set(ENABLE_OPT OFF CACHE BOOL "" FORCE)
 set(BUILD_EXTERNAL OFF CACHE BOOL "" FORCE)
 set(ENABLE_GLSLANG_BINARIES ON CACHE BOOL "" FORCE)
@@ -69,7 +70,7 @@ FetchContent_Declare(venture_glslang
   SYSTEM)
 FetchContent_MakeAvailable(venture_glslang)
 add_custom_command(OUTPUT ${vk_generated}/texture_decode.inc
-  COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0
+  COMMAND glslang-standalone -V --target-env vulkan1.0
     -I${CMAKE_CURRENT_SOURCE_DIR}/shaders ${CMAKE_CURRENT_SOURCE_DIR}/shaders/decode.comp
     -o ${vk_generated}/texture_decode.spv
   COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py
@@ -78,14 +79,14 @@ add_custom_command(OUTPUT ${vk_generated}/texture_decode.inc
     shaders/astc_lookup_tables.glsl shaders/etc2.glsl ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py
   VERBATIM)
 add_custom_command(OUTPUT ${vk_generated}/texture_depth.inc
-  COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0
+  COMMAND glslang-standalone -V --target-env vulkan1.0
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/depth_convert.comp -o ${vk_generated}/texture_depth.spv
   COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py
     ${vk_generated}/texture_depth.spv ${vk_generated}/texture_depth.inc
   DEPENDS glslang-standalone shaders/depth_convert.comp ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py
   VERBATIM)
 add_custom_command(OUTPUT ${vk_generated}/texture_bc7.inc
-  COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0
+  COMMAND glslang-standalone -V --target-env vulkan1.0
     ${CMAKE_CURRENT_SOURCE_DIR}/shaders/bc7_encode.comp -o ${vk_generated}/texture_bc7.spv
   COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py
     ${vk_generated}/texture_bc7.spv ${vk_generated}/texture_bc7.inc
@@ -95,7 +96,7 @@ add_custom_command(OUTPUT ${vk_generated}/texture_bc7.inc
 foreach(shader subpass_probe.vert subpass_probe_write.frag subpass_probe_read.frag)
   string(REPLACE "." "_" shader_name ${shader})
   add_custom_command(OUTPUT ${vk_generated}/${shader_name}.inc
-    COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0
+    COMMAND glslang-standalone -V --target-env vulkan1.0
       ${CMAKE_CURRENT_SOURCE_DIR}/shaders/${shader} -o ${vk_generated}/${shader_name}.spv
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py
       ${vk_generated}/${shader_name}.spv ${vk_generated}/${shader_name}.inc
@@ -116,7 +117,7 @@ foreach(mode float_array srgb_array float_volume srgb_volume unorm_array unorm_v
     list(APPEND image_defines -DIMAGE_VOLUME=1)
   endif()
   add_custom_command(OUTPUT ${vk_generated}/texture_decode_${mode}.inc
-    COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0 ${image_defines}
+    COMMAND glslang-standalone -V --target-env vulkan1.0 ${image_defines}
       -I${CMAKE_CURRENT_SOURCE_DIR}/shaders ${CMAKE_CURRENT_SOURCE_DIR}/shaders/decode.comp
       -o ${vk_generated}/texture_decode_${mode}.spv
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py

@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Build Venture's pinned ANGLE Vulkan DLLs/shared libraries (Windows/Linux x64).
+"""Build Venture's pinned ANGLE Vulkan DLLs/shared libraries (Windows/Linux x64, Linux arm64).
+
+Linux arm64 (Steam Frame) is cross-built on a Linux x64 host with --target-cpu
+arm64 against tools/linux-baseline/aarch64_sysroot.py's sysroot.
 
 Windows provisions portable Microsoft Build Tools/SDK files and accepts their
 license; compilation uses ANGLE's pinned clang-cl, never cl.exe. Nothing is
@@ -172,10 +175,10 @@ def prepare(cache: Path, swiftshader: bool, env):
     return source, msvc
 
 
-def gn_args(msvc: Path | None, swiftshader: bool) -> str:
+def gn_args(msvc: Path | None, swiftshader: bool, target_cpu: str, sysroot: Path | None) -> str:
     args = {
         "is_debug": False, "is_component_build": False, "symbol_level": 1,
-        "target_cpu": "x64", "is_clang": True, "use_siso": False,
+        "target_cpu": target_cpu, "is_clang": True, "use_siso": False,
         "angle_enable_vulkan": True, "angle_enable_d3d11": False,
         "angle_use_custom_libvulkan": False,
         "angle_enable_gl": False, "angle_enable_null": False,
@@ -193,8 +196,11 @@ def gn_args(msvc: Path | None, swiftshader: bool) -> str:
         # Native Linux compiler toolchain with a headless Vulkan display. No
         # install-build-deps.sh or root-level package installation is performed.
         # Venture selects GPUs through Vulkan/OpenXR, so ANGLE needs no libpci.
-        args.update(use_sysroot=False, use_libpci=False, angle_use_x11=False, angle_use_wayland=False,
+        args.update(use_sysroot=sysroot is not None, use_libpci=False, angle_use_x11=False, angle_use_wayland=False,
                     angle_use_vulkan_display=True, angle_vulkan_display_mode="headless")
+        if sysroot is not None:
+            # Cross build: the glibc 2.35 arm64 baseline sysroot instead of Chromium's Debian one.
+            args["target_sysroot"] = str(sysroot)
     return "".join(f"{key} = {json.dumps(value)}\n" for key, value in args.items())
 
 
@@ -354,23 +360,37 @@ def main():
     parser.add_argument("--jobs", type=int, default=min(os.cpu_count() or 4, 16))
     parser.add_argument("--swiftshader", action="store_true")
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--target-cpu", choices=("x64", "arm64"), default="x64",
+                        help="arm64: Linux aarch64 cross build (from a Linux x64 host)")
+    parser.add_argument("--sysroot", type=Path, default=ROOT / ".deps/sysroot-aarch64",
+                        help="arm64 sysroot (tools/linux-baseline/aarch64_sysroot.py)")
     args = parser.parse_args()
     if platform.machine().lower() not in ("amd64", "x86_64") or sys.platform not in ("win32", "linux"):
         parser.error("Only Windows x64 and Linux x64 hosts are supported")
+    sysroot = None
+    if args.target_cpu == "arm64":
+        if sys.platform != "linux":
+            parser.error("--target-cpu arm64 is a Linux cross build")
+        sysroot = args.sysroot.resolve()
+        if not (sysroot / "PACKAGES").is_file():
+            parser.error(f"{sysroot}: run tools/linux-baseline/aarch64_sysroot.py first")
     if not PATCHES:
         raise RuntimeError("Missing Venture ANGLE patch")
     recipe = {"pin": PIN, "patches": [sha(p) for p in PATCHES], "lock": LOCK,
               "script": sha(Path(__file__)), "provision": sha(HERE / "provision_msvc.py"),
               "platform": sys.platform, "swiftshader": args.swiftshader}
+    if sysroot is not None:
+        recipe.update(target_cpu=args.target_cpu, sysroot=sha(sysroot / "PACKAGES"))
     digest = hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
     patch_hash = hashlib.sha256(b"".join(p.read_bytes() for p in PATCHES)).hexdigest()
-    key = f"{PIN}-{patch_hash[:16]}-{digest[:16]}-{sys.platform}-x64"
+    key = f"{PIN}-{patch_hash[:16]}-{digest[:16]}-{sys.platform}-{args.target_cpu}"
+    installed = ROOT / ".deps/angle" / (PIN if args.target_cpu == "x64" else f"{PIN}-{args.target_cpu}")
     cache = args.cache.resolve()
     cache.mkdir(parents=True, exist_ok=True)
     artifact = cache / "prebuilt" / key
     with cache_lock(cache / "build.lock"):
         valid = valid_artifact(artifact, key)
-        if not valid and not args.prepare_only:
+        if not valid and not args.prepare_only and args.target_cpu == "x64":
             compatible = reuse_legacy_artifact(cache, args.swiftshader)
             if compatible:
                 link_install(ROOT / ".deps/angle" / PIN, compatible)
@@ -392,7 +412,11 @@ def main():
             source, msvc = prepare(cache, args.swiftshader, env)
             if args.prepare_only:
                 return
-            config = gn_args(msvc, args.swiftshader)
+            if sysroot is not None:
+                # Host tools (protoc) of a cross build link against Chromium's pinned x64 sysroot.
+                run([sys.executable, "build/linux/sysroot_scripts/install-sysroot.py", "--arch=amd64"],
+                    cwd=source, env=env)
+            config = gn_args(msvc, args.swiftshader, args.target_cpu, sysroot)
             config_hash = hashlib.sha256((PIN + config).encode()).hexdigest()[:16]
             output = source / "out" / ("Venture-" + config_hash)
             output.mkdir(parents=True, exist_ok=True)
@@ -408,7 +432,7 @@ def main():
             print(f"ANGLE built in {elapsed:.1f}s; artifacts: {artifact}", flush=True)
         else:
             print(f"Reusing SHA-256-verified ANGLE artifact: {artifact}", flush=True)
-        link_install(ROOT / ".deps/angle" / PIN, artifact)
+        link_install(installed, artifact)
 
 
 if __name__ == "__main__":

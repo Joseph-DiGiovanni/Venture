@@ -126,8 +126,12 @@ int exists(const std::filesystem::path& p, bool follow) {
   return r < 0 ? native_error() : 0;
 }
 std::shared_ptr<File> open(const MappedPath& p, int flags, std::uint32_t mode, int* error) {
-  // O_DIRECT is only a hint to a guest; host direct IO would demand aligned buffers.
-  auto fd = ::open(p.host.c_str(), (flags & ~O_DIRECT) | O_CLOEXEC, mode);
+  // The VFS passes generic Linux open flags (hle/libc/vfs.h); arm64 numbers
+  // O_DIRECTORY and O_NOFOLLOW differently. O_DIRECT (040000) is only a hint to
+  // a guest: host direct IO would demand aligned buffers. O_LARGEFILE (0100000)
+  // is implied on a 64-bit host.
+  const int host = (flags & ~0740000) | ((flags & 0200000) ? O_DIRECTORY : 0) | ((flags & 0400000) ? O_NOFOLLOW : 0);
+  auto fd = ::open(p.host.c_str(), host | O_CLOEXEC, mode);
   if (fd < 0) {
     *error = native_error();
     return {};

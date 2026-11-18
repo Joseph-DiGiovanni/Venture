@@ -60,6 +60,18 @@
       }
     },
     {
+      "name": "linux-aarch64",
+      "displayName": "Linux aarch64 release (Steam Frame), cross-built against tools/linux-baseline/aarch64_sysroot.py",
+      "inherits": "linux-release",
+      "toolchainFile": "${sourceDir}/cmake/toolchains/linux-aarch64.cmake",
+      "cacheVariables": {
+        "CMAKE_C_COMPILER": "clang",
+        "CMAKE_CXX_COMPILER": "clang++",
+        "CMAKE_C_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG",
+        "CMAKE_CXX_FLAGS_RELWITHDEBINFO": "-O2 -g -DNDEBUG"
+      }
+    },
+    {
       "name": "windows-agent", "inherits": "windows-release",
       "cacheVariables": { "VENTURE_AGENT_CACHE": "ON" }
     },
@@ -73,11 +85,13 @@
     { "name": "windows-release", "configurePreset": "windows-release" },
     { "name": "linux-release", "configurePreset": "linux-release" },
     { "name": "linux-baseline", "configurePreset": "linux-baseline" },
+    { "name": "linux-aarch64", "configurePreset": "linux-aarch64" },
     { "name": "windows-agent", "configurePreset": "windows-agent" },
     { "name": "linux-agent", "configurePreset": "linux-agent" }
   ],
   "testPresets": [
     { "name": "windows-release", "configurePreset": "windows-release", "output": { "outputOnFailure": true } },
-    { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } }
+    { "name": "linux-release", "configurePreset": "linux-release", "output": { "outputOnFailure": true } },
+    { "name": "linux-aarch64", "configurePreset": "linux-aarch64", "output": { "outputOnFailure": true } }
   ]
 }

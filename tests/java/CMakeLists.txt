@@ -1,6 +1,7 @@
 if(TARGET venture-framework)
 
-  find_program(VENTURE_JAVA java HINTS "${VENTURE_JAVA_HOME}/bin" REQUIRED)
+  # Pure-Java fixtures: the build host's JVM runs them, also when cross-compiling.
+  find_program(VENTURE_JAVA java HINTS "${VENTURE_HOST_JAVA_HOME}/bin" NO_DEFAULT_PATH REQUIRED)
   set(framework_test_classes "${CMAKE_CURRENT_BINARY_DIR}/classes")
   add_custom_command(OUTPUT "${framework_test_classes}/FrameworkTest.class"
     COMMAND ${CMAKE_COMMAND} -E make_directory "${framework_test_classes}"

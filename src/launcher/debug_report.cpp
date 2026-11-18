@@ -181,6 +181,50 @@ std::string first_line_with(const fs::path &file, std::string_view prefix) {
     if (line.starts_with(prefix)) return line.substr(prefix.size());
   return {};
 }
+// The first string of a NUL-separated sysfs/devicetree value.
+std::string sysfs_string(const fs::path &file) {
+  auto text = read_file(file, 4096);
+  if (const auto end = std::min(text.find('\0'), text.find('\n')); end != std::string::npos) text.resize(end);
+  return text;
+}
+// arm64 /proc/cpuinfo names no model: the board's devicetree model and each
+// core type from its MIDR implementer and part numbers.
+std::string arm_cpu() {
+  static const std::map<std::pair<unsigned, unsigned>, std::string_view> cores = {
+      {{0x41, 0xd03}, "Cortex-A53"}, {{0x41, 0xd04}, "Cortex-A35"}, {{0x41, 0xd05}, "Cortex-A55"},
+      {{0x41, 0xd07}, "Cortex-A57"}, {{0x41, 0xd08}, "Cortex-A72"}, {{0x41, 0xd09}, "Cortex-A73"},
+      {{0x41, 0xd0a}, "Cortex-A75"}, {{0x41, 0xd0b}, "Cortex-A76"}, {{0x41, 0xd0c}, "Neoverse-N1"},
+      {{0x41, 0xd0d}, "Cortex-A77"}, {{0x41, 0xd40}, "Neoverse-V1"}, {{0x41, 0xd41}, "Cortex-A78"},
+      {{0x41, 0xd44}, "Cortex-X1"}, {{0x41, 0xd46}, "Cortex-A510"}, {{0x41, 0xd47}, "Cortex-A710"},
+      {{0x41, 0xd48}, "Cortex-X2"}, {{0x41, 0xd49}, "Neoverse-N2"}, {{0x41, 0xd4b}, "Cortex-A78C"},
+      {{0x41, 0xd4d}, "Cortex-A715"}, {{0x41, 0xd4e}, "Cortex-X3"}, {{0x41, 0xd4f}, "Neoverse-V2"},
+      {{0x41, 0xd80}, "Cortex-A520"}, {{0x41, 0xd81}, "Cortex-A720"}, {{0x41, 0xd82}, "Cortex-X4"},
+      {{0x41, 0xd84}, "Neoverse-V3"}, {{0x41, 0xd85}, "Cortex-X925"}, {{0x41, 0xd87}, "Cortex-A725"},
+      {{0x41, 0xd8e}, "Neoverse-N3"}, {{0x51, 0x001}, "Oryon"}};
+  std::vector<std::pair<std::string, int>> counts;
+  std::ifstream in("/proc/cpuinfo");
+  unsigned implementer = 0;
+  for (std::string line; std::getline(in, line);) {
+    const auto colon = line.find(':');
+    if (colon == std::string::npos) continue;
+    const auto value = std::strtoul(line.c_str() + colon + 1, nullptr, 0);
+    if (line.starts_with("CPU implementer")) {
+      implementer = unsigned(value);
+    } else if (line.starts_with("CPU part")) {
+      const auto known = cores.find({implementer, unsigned(value)});
+      auto core = known != cores.end() ? std::string(known->second)
+                                       : std::format("implementer {:#x} part {:#x}", implementer, value);
+      auto it = std::ranges::find(counts, core, &std::pair<std::string, int>::first);
+      if (it == counts.end()) counts.emplace_back(std::move(core), 1);
+      else ++it->second;
+    }
+  }
+  std::string out = sysfs_string("/sys/firmware/devicetree/base/model");
+  if (out.empty()) out = first_line_with("/proc/cpuinfo", "Hardware\t: ");
+  for (size_t i = 0; i < counts.size(); ++i)
+    out += std::format("{}{}x {}", i ? ", " : out.empty() ? "" : ": ", counts[i].second, counts[i].first);
+  return out;
+}
 
 void system_section(std::string &out) {
   std::string os = first_line_with("/etc/os-release", "PRETTY_NAME=");
@@ -191,11 +235,13 @@ void system_section(std::string &out) {
   const char *desktop = std::getenv("XDG_CURRENT_DESKTOP"), *session = std::getenv("XDG_SESSION_TYPE");
   out += std::format("Desktop: {} ({})\n", desktop ? desktop : "unknown", session ? session : "unknown session");
   std::string cpu = first_line_with("/proc/cpuinfo", "model name\t: ");
+  if (cpu.empty()) cpu = arm_cpu();
   out += std::format("CPU: {} ({} threads)\n", cpu, std::thread::hardware_concurrency());
   long pages = sysconf(_SC_PHYS_PAGES), avail = sysconf(_SC_AVPHYS_PAGES), size = sysconf(_SC_PAGE_SIZE);
   out += std::format("RAM: {:.1f} GiB, {:.1f} GiB free\n", double(pages) * size / 1073741824.0,
                      double(avail) * size / 1073741824.0);
-  // Names and kernel drivers from lspci, else the PCI ids sysfs gives.
+  // Names and kernel drivers from lspci, else the PCI ids sysfs gives; SoC
+  // (devicetree platform) devices by their compatible string.
   if (auto gpus = gpu_names(); !gpus.empty()) {
     out += gpus;
   } else {
@@ -208,8 +254,25 @@ void system_section(std::string &out) {
       auto driver = fs::read_symlink(device / "driver", ec).filename().string();
       std::erase(vendor, '\n');
       std::erase(id, '\n');
-      out += std::format("GPU: {}:{}, driver {}\n", vendor, id, driver);
+      if (vendor.empty())
+        out += std::format("DRM device: {}, driver {}\n", sysfs_string(device / "of_node/compatible"), driver);
+      else
+        out += std::format("GPU: {}:{}, driver {}\n", vendor, id, driver);
     }
+    // An SoC GPU (Adreno under msm, Mali under panfrost/panthor) is a component of
+    // the display's DRM device; its own platform device scales through devfreq.
+    for (const auto &entry : fs::directory_iterator("/sys/class/devfreq", ec)) {
+      auto device = entry.path() / "device";
+      auto compatible = sysfs_string(device / "of_node/compatible");
+      if (compatible.find("adreno") == std::string::npos && compatible.find("mali") == std::string::npos &&
+          entry.path().filename().string().find("gpu") == std::string::npos)
+        continue;
+      auto driver = fs::read_symlink(device / "driver", ec).filename().string();
+      out += std::format("GPU: {}, driver {}\n", compatible, driver);
+    }
+    // Qualcomm's downstream KGSL driver names the model itself.
+    if (auto model = sysfs_string("/sys/class/kgsl/kgsl-3d0/gpu_model"); !model.empty())
+      out += std::format("GPU: {}, driver kgsl\n", model);
   }
   out += std::format("VR input devices: {}\n", vr_inputs());
 }

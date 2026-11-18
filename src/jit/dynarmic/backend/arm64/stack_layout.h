@@ -19,7 +19,9 @@ namespace Dynarmic::Backend::Arm64 {
 #    pragma warning(disable : 4324)  // Structure was padded due to alignment specifier
 #endif
 
-constexpr std::size_t SpillCount = 64;
+// Precise memory aborts (A64ColdSet*) can keep every guest register's value live
+// across an access, beyond the host registers.
+constexpr std::size_t SpillCount = 128;
 
 struct alignas(16) RSBEntry {
     u64 target;
@@ -38,7 +40,10 @@ struct alignas(16) StackLayout {
 
     s64 cycles_to_run;
 
+    // Host FP environment of the Run caller. Callbacks into C++ run with this FPCR
+    // and FPSR=0; the guest's is reinstalled from the JitState afterwards.
     u32 save_host_fpcr;
+    u32 save_host_fpsr;
 
     bool check_bit;
 };

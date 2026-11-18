@@ -239,6 +239,38 @@ void EmitIR<IR::Opcode::ConditionalSelectNZCV>(oaknut::CodeGenerator& code, Emit
     EmitIR<IR::Opcode::ConditionalSelect32>(code, ctx, inst);
 }
 
+// Venture: as ConditionalSelect, but the condition is evaluated on the NZCV value in args[3]
+// (A64GetSetElimination forwards a pending SetNZCV here instead of storing it first).
+template<std::size_t bitsize>
+static void EmitConditionalSelectFlags(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    const IR::Cond cond = args[0].GetImmediateCond();
+    auto Rresult = ctx.reg_alloc.WriteReg<bitsize>(inst);
+    auto Rthen = ctx.reg_alloc.ReadReg<bitsize>(args[1]);
+    auto Relse = ctx.reg_alloc.ReadReg<bitsize>(args[2]);
+    auto Wnzcv = ctx.reg_alloc.ReadW(args[3]);
+    RegAlloc::Realize(Rresult, Rthen, Relse, Wnzcv);
+    ctx.reg_alloc.SpillFlags();
+
+    code.MSR(oaknut::SystemReg::NZCV, Wnzcv->toX());
+    code.CSEL(Rresult, Rthen, Relse, static_cast<oaknut::Cond>(cond));
+}
+
+template<>
+void EmitIR<IR::Opcode::ConditionalSelectFlags32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitConditionalSelectFlags<32>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::ConditionalSelectFlags64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitConditionalSelectFlags<64>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::ConditionalSelectFlagsNZCV>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitConditionalSelectFlags<32>(code, ctx, inst);
+}
+
 template<>
 void EmitIR<IR::Opcode::LogicalShiftLeft32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     const auto carry_inst = inst->GetAssociatedPseudoOperation(IR::Opcode::GetCarryFromOp);

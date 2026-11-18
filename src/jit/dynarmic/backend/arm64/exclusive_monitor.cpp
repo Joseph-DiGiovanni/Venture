@@ -46,6 +46,10 @@ bool ExclusiveMonitor::CheckAndClear(std::size_t processor_id, VAddr address) {
     return true;
 }
 
+void ExclusiveMonitor::EnableGenerations() {
+    generations.resize(GENERATION_BUCKETS);
+}
+
 void ExclusiveMonitor::Clear() {
     Lock();
     for (size_t i = 0, count = ActiveCount(); i < count; ++i)

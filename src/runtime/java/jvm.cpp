@@ -207,8 +207,13 @@ bool start_jvm(const JvmOptions& options, std::string* error) {
         throw std::runtime_error("framework native registrar left a pending exception");
     }
     lifecycle_changed.notify_all();
-    log::info("java", "HotSpot started (JNI bridge {} / host x64)",
-              process_config().isa() == GuestIsa::a32 ? "ARM32" : "ARM64");
+#if defined(__aarch64__)
+    constexpr const char* host = "arm64";
+#else
+    constexpr const char* host = "x64";
+#endif
+    log::info("java", "HotSpot started (JNI bridge {} / host {})",
+              process_config().isa() == GuestIsa::a32 ? "ARM32" : "ARM64", host);
     profile::mark("jvm_ready");
     return true;
   } catch (const std::exception& e) {

@@ -637,10 +637,11 @@ void EmitIR<IR::Opcode::VectorEqual64>(oaknut::CodeGenerator& code, EmitContext&
 
 template<>
 void EmitIR<IR::Opcode::VectorEqual128>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitThreeOp(code, ctx, inst, [&](auto& Qresult, auto& Qa, auto& Qb) {
+        code.CMEQ(V0.D2(), Qa->D2(), Qb->D2());
+        code.EXT(V1.B16(), V0.B16(), V0.B16(), 8);
+        code.AND(Qresult->B16(), V0.B16(), V1.B16());
+    });
 }
 
 template<>
@@ -1382,10 +1383,10 @@ void EmitIR<IR::Opcode::VectorSignExtend32>(oaknut::CodeGenerator& code, EmitCon
 
 template<>
 void EmitIR<IR::Opcode::VectorSignExtend64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitTwoOp(code, ctx, inst, [&](auto& Qresult, auto& Qoperand) {
+        code.SSHR(D0, Qoperand->toD(), 63);
+        code.ZIP1(Qresult->D2(), Qoperand->D2(), V0.D2());
+    });
 }
 
 template<>
@@ -1403,20 +1404,61 @@ void EmitIR<IR::Opcode::VectorSignedAbsoluteDifference32>(oaknut::CodeGenerator&
     EmitThreeOpArranged<32>(code, ctx, inst, [&](auto Vresult, auto Va, auto Vb) { code.SABD(Vresult, Va, Vb); });
 }
 
+// GetUpperFromOp: the high half of each lane's full product; GetLowerFromOp: the low half.
+template<std::size_t esize, bool is_signed>
+static void EmitVectorMultiplyFull(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    const auto upper_inst = inst->GetAssociatedPseudoOperation(IR::Opcode::GetUpperFromOp);
+    const auto lower_inst = inst->GetAssociatedPseudoOperation(IR::Opcode::GetLowerFromOp);
+
+    auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    auto Qa = ctx.reg_alloc.ReadQ(args[0]);
+    auto Qb = ctx.reg_alloc.ReadQ(args[1]);
+    RegAlloc::Realize(Qa, Qb);
+
+    if (upper_inst) {
+        auto Qupper = ctx.reg_alloc.WriteQ(upper_inst);
+        RegAlloc::Realize(Qupper);
+        if constexpr (esize == 16) {
+            if constexpr (is_signed) {
+                code.SMULL(V0.S4(), Qa->toD().H4(), Qb->toD().H4());
+                code.SMULL2(V1.S4(), Qa->H8(), Qb->H8());
+            } else {
+                code.UMULL(V0.S4(), Qa->toD().H4(), Qb->toD().H4());
+                code.UMULL2(V1.S4(), Qa->H8(), Qb->H8());
+            }
+            code.UZP2(Qupper->H8(), V0.H8(), V1.H8());
+        } else {
+            static_assert(esize == 32);
+            if constexpr (is_signed) {
+                code.SMULL(V0.D2(), Qa->toD().S2(), Qb->toD().S2());
+                code.SMULL2(V1.D2(), Qa->S4(), Qb->S4());
+            } else {
+                code.UMULL(V0.D2(), Qa->toD().S2(), Qb->toD().S2());
+                code.UMULL2(V1.D2(), Qa->S4(), Qb->S4());
+            }
+            code.UZP2(Qupper->S4(), V0.S4(), V1.S4());
+        }
+    }
+
+    if (lower_inst) {
+        auto Qlower = ctx.reg_alloc.WriteQ(lower_inst);
+        RegAlloc::Realize(Qlower);
+        if constexpr (esize == 16) {
+            code.MUL(Qlower->H8(), Qa->H8(), Qb->H8());
+        } else {
+            code.MUL(Qlower->S4(), Qa->S4(), Qb->S4());
+        }
+    }
+}
+
 template<>
 void EmitIR<IR::Opcode::VectorSignedMultiply16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitVectorMultiplyFull<16, true>(code, ctx, inst);
 }
 
 template<>
 void EmitIR<IR::Opcode::VectorSignedMultiply32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitVectorMultiplyFull<32, true>(code, ctx, inst);
 }
 
 template<>
@@ -1777,18 +1819,12 @@ void EmitIR<IR::Opcode::VectorUnsignedAbsoluteDifference32>(oaknut::CodeGenerato
 
 template<>
 void EmitIR<IR::Opcode::VectorUnsignedMultiply16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitVectorMultiplyFull<16, false>(code, ctx, inst);
 }
 
 template<>
 void EmitIR<IR::Opcode::VectorUnsignedMultiply32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
-    (void)code;
-    (void)ctx;
-    (void)inst;
-    UNREACHABLE();
+    EmitVectorMultiplyFull<32, false>(code, ctx, inst);
 }
 
 template<>

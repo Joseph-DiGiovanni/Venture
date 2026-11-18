@@ -80,12 +80,14 @@ using FunctionId = std::uint32_t;
 // changes, signal delivery, unwind, exit or interruptible blocking waits.
 // Handlers that change FPCR/CPSR translation modes also need the run loop.
 // InJitGuestFp is InJitFp for pure math: inside the A64 JIT the handler keeps
-// the guest MXCSR (see guest_fp_environment); A32 and the run loop use InJitFp.
+// the guest MXCSR or FPCR/FPSR (see guest_fp_environment); A32 and the run
+// loop use InJitFp.
 enum class Execution { RunLoop, InJit, InJitFp, InJitGuestFp };
-// Set while an InJitGuestFp handler runs inside the A64 JIT. The live MXCSR is
-// then the guest's: host math rounds in the guest mode and its exception flags
-// are guest FPSR flags. The handler must not use the Cpu FPSR accessors or set
-// the FPCR meanwhile; the JIT keeps the live MXCSR, not the saved copy.
+// Set while an InJitGuestFp handler runs inside the A64 JIT. The live MXCSR
+// (x86-64) or FPCR/FPSR (AArch64) is then the guest's: host math rounds in the
+// guest mode and its exception flags are guest FPSR flags. The handler must not
+// use the Cpu FPSR accessors or set the FPCR meanwhile; the JIT keeps the live
+// register, not the saved copy.
 inline thread_local bool guest_fp_environment = false;
 struct GuestFpScope {
   explicit GuestFpScope(bool guest) noexcept { guest_fp_environment = guest; }

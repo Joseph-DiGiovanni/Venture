@@ -62,8 +62,13 @@ void park(int, siginfo_t*, void* raw) {
   if (slot.target.load(std::memory_order_acquire) == gettid_raw() &&
       slot.state.compare_exchange_strong(expected, captured, std::memory_order_acq_rel)) {
     const auto& context = static_cast<ucontext_t*>(raw)->uc_mcontext;
+#if defined(__aarch64__)
+    slot.rip = static_cast<std::uintptr_t>(context.pc);
+    slot.rbp = static_cast<std::uintptr_t>(context.regs[29]);  // x29, the frame pointer
+#else
     slot.rip = static_cast<std::uintptr_t>(context.gregs[REG_RIP]);
     slot.rbp = static_cast<std::uintptr_t>(context.gregs[REG_RBP]);
+#endif
     futex(slot.state, FUTEX_WAKE, 1);
     // Bounded: a sampler that vanished must not wedge the target.
     wait_change(slot.state, captured, 2'000'000'000);
@@ -79,6 +84,9 @@ bool unclaimed(const struct sigaction& action) {
 // in-process code install handlers wherever they like. Sampling therefore
 // claims a signal nobody has a handler on (searching down from SIGRTMAX, away
 // from the low numbers libraries tend to hard-code), and never replaces one.
+// A claimed signal must also be sendable: qemu-user accepts handlers for the
+// top guest real-time signals but cannot deliver them. `park` ignores the
+// test delivery, which finds no request.
 int claim_signal() {
   struct sigaction action{};
   action.sa_sigaction = park;
@@ -88,8 +96,8 @@ int claim_signal() {
     struct sigaction previous{};
     if (sigaction(signal, nullptr, &previous) || !unclaimed(previous)) continue;
     if (sigaction(signal, &action, &previous)) continue;
-    if (unclaimed(previous)) return signal;
-    sigaction(signal, &previous, nullptr);  // claimed meanwhile: give it back
+    if (unclaimed(previous) && !syscall(SYS_tgkill, getpid(), gettid_raw(), signal)) return signal;
+    sigaction(signal, &previous, nullptr);  // claimed meanwhile, or not deliverable: give it back
   }
   return 0;
 }

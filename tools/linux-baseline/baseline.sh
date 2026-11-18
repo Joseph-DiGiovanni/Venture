@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Build the Linux release on the glibc 2.35 baseline (docs/LINUX_RELEASE_BUILD.md).
 #
-#   tools/linux-baseline/baseline.sh image        # build the container image
-#   tools/linux-baseline/baseline.sh deps         # ANGLE + FFmpeg for the baseline
-#   tools/linux-baseline/baseline.sh release      # configure, build, package-release
-#   tools/linux-baseline/baseline.sh run CMD...   # any command in the container
+#   tools/linux-baseline/baseline.sh image            # build the container image
+#   tools/linux-baseline/baseline.sh deps             # ANGLE + FFmpeg for the baseline
+#   tools/linux-baseline/baseline.sh release          # configure, build, package-release
+#   tools/linux-baseline/baseline.sh deps-aarch64     # aarch64 sysroot, JDKs, FFmpeg, ANGLE (cross)
+#   tools/linux-baseline/baseline.sh release-aarch64  # dist/Venture-linux-aarch64 (linux-aarch64 preset)
+#   tools/linux-baseline/baseline.sh run CMD...       # any command in the container
 #
 # Rootless podman; the checkout and $HOME are mounted at their own paths, so the
 # .deps links and caches resolve as on the host. Baseline-built ANGLE/FFmpeg
@@ -36,6 +38,11 @@ case "${1:-}" in
     run python3 tools/ffmpeg/build_ffmpeg.py ;;
   release)
     run bash -c "cmake --preset linux-baseline ${VENTURE_BASELINE_CMAKE_ARGS:-} && cmake --build build/linux-baseline -j $jobs --target package-release" ;;
+  deps-aarch64)
+    run python3 tools/bootstrap.py --jdk --target aarch64
+    run python3 tools/angle/build_angle.py --target-cpu arm64 --jobs "$jobs" ;;
+  release-aarch64)
+    run bash -c "cmake --preset linux-aarch64 ${VENTURE_BASELINE_CMAKE_ARGS:-} && cmake --build build/linux-aarch64 -j $jobs --target package-release" ;;
   run) shift; run "$@" ;;
-  *) sed -n '2,13p' "$0"; exit 2 ;;
+  *) sed -n '2,15p' "$0"; exit 2 ;;
 esac

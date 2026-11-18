@@ -1,9 +1,13 @@
 #include "common/platform/posix/dbus.h"
 
 #include <dlfcn.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
+#include <cerrno>
 #include <mutex>
 #include <type_traits>
+#include <vector>
 
 namespace venture::dbus {
 namespace {
@@ -13,6 +17,33 @@ struct Error {
   const char* message = nullptr;
   int need_free = 0;
 };
+// sd-bus reads the peer's supplementary groups on every connect with
+// getsockopt(SO_PEERGROUPS) and retries ERANGE with the size the kernel
+// reported. qemu-user hands that option an int buffer and fails ERANGE
+// without a size, so each connection would retry forever.
+bool peer_groups_sized() {
+#ifdef SO_PEERGROUPS
+  int fds[2];
+  if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds)) return true;
+  std::vector<gid_t> groups(64);  // sd-bus's first size
+  bool sized = true;
+  for (;;) {
+    const auto size = static_cast<socklen_t>(groups.size() * sizeof(gid_t));
+    socklen_t n = size;
+    if (!getsockopt(fds[0], SOL_SOCKET, SO_PEERGROUPS, groups.data(), &n) || errno != ERANGE) break;
+    if (n <= size) {
+      sized = false;
+      break;
+    }
+    groups.resize(n / sizeof(gid_t));
+  }
+  close(fds[0]);
+  close(fds[1]);
+  return sized;
+#else
+  return true;
+#endif
+}
 struct Library {
   int (*open_system)(void**);
   int (*open_user)(void**);
@@ -39,7 +70,7 @@ struct Library {
     bind(message_unref, "sd_bus_message_unref");
     bind(error_free, "sd_bus_error_free");
     bind(flush_close_unref, "sd_bus_flush_close_unref");
-    loaded = ok;
+    loaded = ok && peer_groups_sized();
   }
 };
 const Library& library() {

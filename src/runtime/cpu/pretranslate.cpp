@@ -1,4 +1,13 @@
 #include "cpu/pretranslate.h"
+#if defined(__aarch64__)
+namespace venture::pretranslate {
+// Background translation fills the portable block cache, which holds x64 machine code only
+// (cpu/portable_cache.cpp): the arm64 build has neither.
+void reached(std::uint64_t) noexcept {}
+void flush_reached() noexcept {}
+void stop() noexcept {}
+} // namespace venture::pretranslate
+#else
 #include "cpu/cpu.h"
 #include "cpu/portable_cache.h"
 #include <dynarmic/backend/x64/portable_block.h>
@@ -526,3 +535,4 @@ void stop() noexcept {
   for (int i = 0; i < 100 && s.busy.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(2));
 }
 } // namespace venture::pretranslate
+#endif

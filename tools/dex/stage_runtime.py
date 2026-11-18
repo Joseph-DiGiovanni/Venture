@@ -44,7 +44,9 @@ def remove_python_driver(dex):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bin", required=True, type=Path)
-    parser.add_argument("--jdk", required=True, type=Path)
+    parser.add_argument("--jdk", required=True, type=Path, help="target JDK, staged as java/jdk")
+    parser.add_argument("--host-jdk", type=Path,
+                        help="JDK that runs on the build host (cross builds); default --jdk")
     parser.add_argument("--bridge", required=True, type=Path)
     parser.add_argument("--agent", required=True, type=Path)
     args = parser.parse_args()
@@ -59,7 +61,10 @@ def main():
     for name in ("LICENSE.txt", "NOTICE.txt"):
         copy_file(DEPS / "dex2jar" / name, java / "dex2jar" / name)
     copy_file(DEPS / "framework-res/android-32.hierarchy.tsv", java / "android-32.hierarchy.tsv")
-    executable = java / "jdk/bin" / ("java.exe" if os.name == "nt" else "java")
+    # A cross build's staged JDK cannot run here; the identity hashes the staged
+    # java/jdk files (relative to dex/classes), whichever JVM computes it.
+    host = args.host_jdk / "bin" if args.host_jdk else java / "jdk/bin"
+    executable = host / ("java.exe" if os.name == "nt" else "java")
     if executable.is_file():
         # Dependency bytes are immutable in the distributed bundle. Compute
         # their identity during staging, rather than rereading the JDK modules

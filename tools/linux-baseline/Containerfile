@@ -22,10 +22,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libssl-dev libsecret-1-dev \
       libwayland-dev libxkbcommon-dev libegl-dev libdrm-dev libgbm-dev \
       libpipewire-0.3-dev libpulse-dev libasound2-dev libdbus-1-dev libudev-dev libusb-1.0-0-dev \
-      libvulkan1 mesa-vulkan-drivers && \
+      libvulkan1 mesa-vulkan-drivers \
+      qemu-user-static zstd && \
     rm -rf /var/lib/apt/lists/*
 # libvulkan1 mesa-vulkan-drivers above: the Vulkan loader and lavapipe, the software Vulkan the test suite runs on
-# (as tools/gpu_policy.py does).
+# (as tools/gpu_policy.py does). qemu-user-static and zstd: the aarch64 cross build (baseline.sh
+# release-aarch64) runs its target-built tools under QEMU and unpacks the arm64 sysroot's packages.
 
 # Unversioned LLVM tool names first on PATH; tools/*.py need Python >= 3.12 (deadsnakes).
 # libatomic is linked statically: a directory holding only the archive is
@@ -33,5 +35,5 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN mkdir -p /opt/venture-baseline/bin /opt/venture-baseline/static && \
     ln -s /usr/bin/python3.12 /opt/venture-baseline/bin/python3 && \
     ln -s /usr/bin/python3.12 /opt/venture-baseline/bin/python && \
-    ln -s /usr/lib/gcc/x86_64-linux-gnu/11/libatomic.a /opt/venture-baseline/static/libatomic.a
+    ln -s "/usr/lib/gcc/$(uname -m)-linux-gnu/11/libatomic.a" /opt/venture-baseline/static/libatomic.a
 ENV PATH=/opt/venture-baseline/bin:/usr/lib/llvm-${LLVM}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin

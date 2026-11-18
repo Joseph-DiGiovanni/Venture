@@ -29,9 +29,10 @@ bool native_fault_matches(const NativeMemoryCall& call, GuestAddr address, bool 
   return matches;
 }
 bool native_ranges_valid(NativeMemoryCall& call) {
-  // A noncanonical x86 operand can report fault address zero. Validate only
-  // these unusual ranges before entering the CRT; ordinary user pointers take
-  // no OS query, and valid wider Linux mappings remain supported.
+  // A noncanonical x86 operand can report fault address zero (so can an arm64
+  // guest of qemu-user on an x86-64 host). Validate only these unusual ranges
+  // before entering the CRT; ordinary user pointers take no OS query, and
+  // valid wider Linux mappings remain supported.
   const auto check = [&](GuestAddr address, bool write) {
     if (!call.size) return true;
     constexpr GuestAddr usual_user_limit = 1ull << 47;

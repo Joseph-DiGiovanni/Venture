@@ -21,30 +21,40 @@ unsigned guest_exceptions(int host) {
   return ((host & FE_INVALID) ? 1 : 0) | ((host & FE_DIVBYZERO) ? 2 : 0) | ((host & FE_OVERFLOW) ? 4 : 0) |
          ((host & FE_UNDERFLOW) ? 8 : 0) | ((host & FE_INEXACT) ? 16 : 0);
 }
-// Host float and double math runs in SSE registers, except nexttoward's
-// long double operand. For the SSE
-// functions MXCSR is the whole host environment, so the scope only sets its
-// rounding mode and reads its flags, without saving the x87 environment.
+// Host float and double math runs in SSE or AArch64 FP registers, except
+// nexttoward's long double operand. For those functions MXCSR (x86) or
+// FPCR/FPSR (AArch64) is the whole host environment, so the scope only sets
+// the guest modes and reads the flags, without saving the full environment.
 #if defined(__x86_64__) || defined(_M_X64)
-constexpr bool sse_math = true;
+constexpr bool register_math = true;
 // MXCSR flags: invalid 0x01, denormal 0x02, divide-by-zero 0x04, overflow 0x08,
 // underflow 0x10, inexact 0x20. Denormal input has no FE_* bit.
 unsigned guest_mxcsr_exceptions(unsigned csr) {
   return (csr & 0x01) | ((csr >> 1) & 0x1e);
 }
+#elif defined(__aarch64__)
+constexpr bool register_math = true;
+// The host FPCR/FPSR are the guest's registers: same bits, same meaning.
+std::uint64_t host_fpcr() { std::uint64_t v; asm volatile("mrs %0, fpcr" : "=r"(v)); return v; }
+void set_host_fpcr(std::uint64_t v) { asm volatile("msr fpcr, %0" :: "r"(v) : "memory"); }
+std::uint64_t host_fpsr() { std::uint64_t v; asm volatile("mrs %0, fpsr" : "=r"(v)); return v; }
+void set_host_fpsr(std::uint64_t v) { asm volatile("msr fpsr, %0" :: "r"(v) : "memory"); }
+// FPCR: RMode [23:22], FZ 24, DN 25; trap enables [15:8] stay clear on the host.
+constexpr std::uint64_t fpcr_guest_modes = (3ull << 22) | (1ull << 24) | (1ull << 25), fpcr_traps = 0x9f00;
 #else
-constexpr bool sse_math = false;
+constexpr bool register_math = false;
 #endif
 template <bool X87 = false>
 struct MathScope {
-  static constexpr bool full = X87 || !sse_math;
+  static constexpr bool full = X87 || !register_math;
   CallContext& c;
-  // Inside the A64 JIT an InJitGuestFp handler runs in the guest MXCSR: the
-  // math already rounds in the guest mode and raises guest FPSR flags, so only
-  // errno needs translating.
+  // Inside the A64 JIT an InJitGuestFp handler runs in the guest MXCSR or
+  // FPCR/FPSR: the math already rounds in the guest mode and raises guest
+  // FPSR flags, so only errno needs translating.
   const bool guest = !full && guest_fp_environment;
   std::fenv_t saved{};
   unsigned saved_csr = 0;
+  std::uint64_t saved_fpcr = 0, saved_fpsr = 0;
   int* host_errno;
   int saved_errno;
   explicit MathScope(CallContext& ctx) : c(ctx), host_errno(&errno), saved_errno(*host_errno) {
@@ -63,6 +73,13 @@ struct MathScope {
       constexpr unsigned rounding[] = {0u << 13, 2u << 13, 1u << 13, 3u << 13};
       saved_csr = _mm_getcsr();
       _mm_setcsr((saved_csr & ~0x603fu) | 0x1f80u | rounding[mode]);
+#elif defined(__aarch64__)
+      // Guest rounding, flush-to-zero and default-NaN modes apply as they are.
+      saved_fpcr = host_fpcr();
+      saved_fpsr = host_fpsr();
+      const auto fpcr = (saved_fpcr & ~(fpcr_guest_modes | fpcr_traps)) | (c.cpu().fpcr() & fpcr_guest_modes);
+      if (fpcr != saved_fpcr) set_host_fpcr(fpcr);
+      set_host_fpsr(0);
 #endif
     }
   }
@@ -74,20 +91,33 @@ struct MathScope {
       set_error(err::kERANGE);
     *host_errno = saved_errno;
   }
-  void leave() {
-    unsigned raised = 0;
-    if constexpr (full)
-      raised = guest_exceptions(std::fetestexcept(FE_ALL_EXCEPT));
+  // The guest flags this scope's host math has raised so far.
+  unsigned raised() const {
+    if constexpr (full) {
+      return guest_exceptions(std::fetestexcept(FE_ALL_EXCEPT));
+    } else {
 #if defined(__x86_64__) || defined(_M_X64)
-    else
-      raised = guest_mxcsr_exceptions(_mm_getcsr());
+      return guest_mxcsr_exceptions(_mm_getcsr());
+#elif defined(__aarch64__)
+      return static_cast<unsigned>(host_fpsr()) & all_exceptions;
+#else
+      return 0;
 #endif
-    c.cpu().set_fpsr(c.cpu().fpsr() | raised);
+    }
+  }
+  void leave() {
+    const unsigned flags = raised();
+    c.cpu().set_fpsr(c.cpu().fpsr() | flags);
     if constexpr (full)
       std::fesetenv(&saved);
 #if defined(__x86_64__) || defined(_M_X64)
     else
       _mm_setcsr(saved_csr);
+#elif defined(__aarch64__)
+    else {
+      set_host_fpsr(saved_fpsr);
+      if (host_fpcr() != saved_fpcr) set_host_fpcr(saved_fpcr);
+    }
 #endif
   }
 };
@@ -95,6 +125,8 @@ struct MathScope {
 void raise_invalid(CallContext& c) {
 #if defined(__x86_64__) || defined(_M_X64)
   if (guest_fp_environment) { _mm_setcsr(_mm_getcsr() | 1); return; }
+#elif defined(__aarch64__)
+  if (guest_fp_environment) { set_host_fpsr(host_fpsr() | 1); return; }
 #endif
   c.cpu().set_fpsr(c.cpu().fpsr() | 1);
 }
@@ -232,11 +264,7 @@ T ldexp_impl(CallContext& c, T x, int e) {
   x *= power(e);
   // Inspect this call's flags, not its result: directed overflow may return
   // the largest finite value, and underflow may return a nonzero subnormal.
-#if defined(__x86_64__) || defined(_M_X64)
-  const unsigned raised = guest_mxcsr_exceptions(_mm_getcsr());
-#else
-  const unsigned raised = guest_exceptions(std::fetestexcept(FE_ALL_EXCEPT));
-#endif
+  const unsigned raised = scope.raised();
   if (raised & (4 | 8)) *scope.host_errno = ERANGE;
   return x;
 }

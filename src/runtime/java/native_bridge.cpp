@@ -82,20 +82,30 @@ std::mutex libraries_mutex;
 std::condition_variable libraries_changed;
 std::vector<std::shared_ptr<Loaded>> libraries;
 void* make_stub(NativeRecord* record) {
-  // ENDBR64; movabs r10,record; movabs r11,entry; jmp r11.
   // Tail jump preserves the JVM's return address and arguments. No live RWX.
+  auto context = reinterpret_cast<std::uintptr_t>(record);
+  auto entry = reinterpret_cast<std::uintptr_t>(&venture_java_native_entry);
+#if defined(__aarch64__)
+  // ldr x16,record; ldr x17,entry; br x17; nop. The page-aligned stub keeps
+  // both literals 8-byte aligned; x16/x17 are the AAPCS64 IP scratch registers.
+  std::array<std::byte, 32> code{};
+  const std::uint32_t text[] = {0x58000090, 0x580000b1, 0xd61f0220, 0xd503201f};
+  std::memcpy(code.data(), text, sizeof(text));
+  std::memcpy(code.data() + 16, &context, 8);
+  std::memcpy(code.data() + 24, &entry, 8);
+#else
+  // ENDBR64; movabs r10,record; movabs r11,entry; jmp r11.
   std::array<std::byte, 27> code{};
   const unsigned char prefix[] = {0xf3, 0x0f, 0x1e, 0xfa, 0x49, 0xba};
   std::memcpy(code.data(), prefix, sizeof(prefix));
-  auto context = reinterpret_cast<std::uintptr_t>(record);
   std::memcpy(code.data() + 6, &context, 8);
   code[14] = std::byte{0x49};
   code[15] = std::byte{0xbb};
-  auto entry = reinterpret_cast<std::uintptr_t>(&venture_java_native_entry);
   std::memcpy(code.data() + 16, &entry, 8);
   code[24] = std::byte{0x41};
   code[25] = std::byte{0xff};
   code[26] = std::byte{0xe3};
+#endif
   return platform::executable_stub(code);
 }
 void JNICALL loader_load(JNIEnv* env, jclass, jstring name, jobject loader) noexcept {
@@ -135,31 +145,16 @@ HostArguments guest_path_arguments(JNIEnv* env, const Descriptor& descriptor,
                                   const HostArguments& host, HostAbi abi,
                                   std::vector<std::uint64_t>& copied_stack) {
   auto out = host;
-  unsigned gp = 2, fp = 0, position = 2, stack = 0, stack_size = 0;
+  HostSlots sizing(abi);
+  for (auto type : descriptor.parameters) sizing.next(type);
+  const unsigned stack_size = sizing.stack_slots();
+  HostSlots slots(abi);
   for (auto type : descriptor.parameters) {
-    const bool floating = type == Type::Float || type == Type::Double;
-    if (abi == HostAbi::Win64) stack_size += position++ >= 4;
-    else if (floating) stack_size += fp++ >= 8;
-    else stack_size += gp++ >= 6;
-  }
-  gp = position = 2; fp = 0;
-  for (auto type : descriptor.parameters) {
-    const bool floating = type == Type::Float || type == Type::Double;
-    bool spilled;
-    unsigned index;
-    if (abi == HostAbi::Win64) {
-      spilled = position >= 4;
-      index = spilled ? position - 4 : position;
-      ++position;
-    } else if (floating) {
-      spilled = fp >= 8;
-      index = spilled ? stack++ : fp++;
-    } else {
-      spilled = gp >= 6;
-      index = spilled ? stack++ : gp++;
-    }
+    const auto slot = slots.next(type);
     if (type != Type::Object) continue;
-    auto object = g2h<_jobject>(spilled ? host.stack[index] : host.gp[index]);
+    const bool spilled = slot.spilled;
+    const unsigned index = slot.index;
+    auto object = g2h<_jobject>(host_value(host, slot));
     if (!object || !env->IsInstanceOf(object, string_class)) continue;
     auto string = static_cast<jstring>(object);
     const char* chars = env->GetStringUTFChars(string, nullptr);
@@ -210,11 +205,7 @@ extern "C" std::uint64_t venture_java_native_dispatch(NativeRecord* record, cons
     if (trace)
       log::info("jni-trace", "native {}{} target={:#x}", record->name,
                 record->signature, record->function);
-#ifdef _WIN32
-    constexpr auto host_abi = HostAbi::Win64;
-#else
-    constexpr auto host_abi = HostAbi::SysV;
-#endif
+    constexpr auto host_abi = kHostAbi;
     std::vector<std::uint64_t> path_stack;
     const auto path_host = guest_path_arguments(env, record->descriptor, *host, host_abi, path_stack);
     if (env->ExceptionCheck()) return 0;

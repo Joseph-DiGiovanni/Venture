@@ -3,7 +3,7 @@ pkgname=venture-bin
 pkgver=@VERSION@
 pkgrel=1
 pkgdesc="Play Meta Quest games on PC VR (prebuilt Linux release)"
-arch=('x86_64')
+arch=('@ARCH@')
 url="https://venture-emu.org/"
 license=('GPL-3.0-or-later')
 depends=('glibc>=2.35' 'gcc-libs')
@@ -13,11 +13,11 @@ optdepends=('vulkan-icd-loader: Vulkan loader (required to run games)'
 provides=('venture')
 conflicts=('venture')
 options=('!strip' '!debug')
-source=("Venture-${pkgver}-linux-x86_64.tar.gz::https://github.com/Villagers654/Venture/releases/download/v${pkgver}/Venture-${pkgver}-linux-x86_64.tar.gz")
+source=("Venture-${pkgver}-linux-@ARCH@.tar.gz::https://github.com/Villagers654/Venture/releases/download/v${pkgver}/Venture-${pkgver}-linux-@ARCH@.tar.gz")
 sha256sums=('@SHA256@')
 
 package() {
-  cd "$srcdir/Venture-linux64"
+  cd "$srcdir/@LAYOUT@"
   install -d "$pkgdir/opt/venture" "$pkgdir/usr/bin" "$pkgdir/usr/share"
   cp -a share/. "$pkgdir/usr/share/"
   find . -mindepth 1 -maxdepth 1 ! -name share -exec cp -a {} "$pkgdir/opt/venture/" \;

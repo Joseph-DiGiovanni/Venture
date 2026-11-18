@@ -69,5 +69,7 @@ constexpr RegisterList ABI_CALLER_SAVE = 0xffffffff'4000ffff;
 
 void ABI_PushRegisters(oaknut::CodeGenerator& code, RegisterList rl, std::size_t stack_space);
 void ABI_PopRegisters(oaknut::CodeGenerator& code, RegisterList rl, std::size_t stack_space);
+/// Bytes ABI_PushRegisters(code, rl, 0) moves SP down by.
+std::size_t ABI_PushedSize(RegisterList rl);
 
 }  // namespace Dynarmic::Backend::Arm64

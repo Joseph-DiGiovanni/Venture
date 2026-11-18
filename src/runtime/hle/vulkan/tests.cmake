@@ -12,7 +12,7 @@ target_sources(venture_tests PRIVATE runtime/vulkan_multiview_test.cpp runtime/v
 target_include_directories(venture_tests PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 foreach(stage vert frag)
   add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vulkan_multiview.${stage}.inc
-    COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.1
+    COMMAND glslang-standalone -V --target-env vulkan1.1
       ${PROJECT_SOURCE_DIR}/tests/runtime/vulkan_multiview.${stage}
       -o ${CMAKE_CURRENT_BINARY_DIR}/vulkan_multiview.${stage}.spv
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py
@@ -23,7 +23,7 @@ foreach(stage vert frag)
   target_sources(venture_tests PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vulkan_multiview.${stage}.inc)
 endforeach()
 add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vulkan_texture_guest_compute.comp.inc
-  COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.0
+  COMMAND glslang-standalone -V --target-env vulkan1.0
     ${PROJECT_SOURCE_DIR}/tests/runtime/vulkan_texture_guest_compute.comp
     -o ${CMAKE_CURRENT_BINARY_DIR}/vulkan_texture_guest_compute.comp.spv
   COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py
@@ -34,7 +34,7 @@ add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vulkan_texture_guest_compu
 target_sources(venture_tests PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vulkan_texture_guest_compute.comp.inc)
 foreach(env 1.0 1.1)
   add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/vulkan_subpass_inputs.${env}.inc
-    COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan${env}
+    COMMAND glslang-standalone -V --target-env vulkan${env}
       ${PROJECT_SOURCE_DIR}/tests/runtime/vulkan_subpass_inputs.frag
       -o ${CMAKE_CURRENT_BINARY_DIR}/vulkan_subpass_inputs.${env}.spv
     COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py
@@ -44,7 +44,7 @@ foreach(env 1.0 1.1)
     VERBATIM)
   target_sources(venture_tests PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/vulkan_subpass_inputs.${env}.inc)
 endforeach()
-target_link_libraries(venture_tests PRIVATE astcenc-sse2-static)
+target_link_libraries(venture_tests PRIVATE ${VENTURE_ASTCENC_LIBRARY})
 if(UNIX)
   target_link_libraries(venture_tests PRIVATE ${CMAKE_DL_LIBS})
 endif()

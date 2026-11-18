@@ -1,6 +1,14 @@
 #include <dynarmic/interface/A64/a64.h>
 #include <dynarmic/interface/exclusive_monitor.h>
+#if defined(__aarch64__)
+#include <dynarmic/backend/arm64/a64_jitstate.h>
+using JitState=Dynarmic::Backend::Arm64::A64JitState;
+static std::uint32_t pstate(const JitState& s){return s.cpsr_nzcv;}
+#else
 #include <dynarmic/backend/x64/a64_jitstate.h>
+using JitState=Dynarmic::Backend::X64::A64JitState;
+static std::uint32_t pstate(const JitState& s){return s.GetPstate();}
+#endif
 #include <array>
 #include <optional>
 #include <string>
@@ -38,10 +46,13 @@ int main(){try{
   A64::UserConfig c;c.fastmem_pointer=0;c.fastmem_address_space_bits=64;c.silently_mirror_fastmem=false;c.callbacks=&e;c.global_monitor=&monitor;c.processor_id=0;c.enable_cycle_counting=false;c.enable_register_cache=cached;c.enable_bounded_halt_polling=true;c.nzcv_exit_liveness=true;c.fast_dispatch_table_bits=12;
   if(enabled){c.diagnostic_entry.selected=[&](u64 pc){for(auto p:e.selected)if(p==pc)return true;return false;};c.diagnostic_entry.user=&e;
    c.diagnostic_entry.record=[](void* user,u64 pc,const void* raw)noexcept{
-    auto& e=*static_cast<Env*>(user);const auto& s=*static_cast<const Backend::X64::A64JitState*>(raw);
-    e.samples.push_back({pc,s.sp,s.GetPstate(),s.reg});
+    auto& e=*static_cast<Env*>(user);const auto& s=*static_cast<const JitState*>(raw);
+    e.samples.push_back({pc,s.sp,pstate(s),s.reg});
+    // Clobber caller-saved scratch registers the JIT must not rely on across the call.
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
     asm volatile("movabs $0x1234567812345678, %%r10\n\tmov %%r10, %%r11":::"r10","r11");
+#elif defined(__aarch64__) && (defined(__GNUC__) || defined(__clang__))
+    asm volatile("movz x16, #0x5678\n\tmov x17, x16\n\tmsr nzcv, x16":::"x16","x17","cc");
 #endif
    };
   }

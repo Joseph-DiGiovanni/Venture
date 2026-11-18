@@ -292,6 +292,8 @@ public:
     void ReadWriteFlags(Argument& read, IR::Inst* write);
     void SpillFlags();
     void SpillAll();
+    /// Where a non-immediate argument's value is now, without moving it.
+    std::optional<HostLoc> ArgumentLocation(const Argument& arg) const;
 
     template<typename... Ts>
     static void Realize(Ts&... rs) {

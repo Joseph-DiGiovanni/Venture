@@ -1,7 +1,18 @@
-set(VENTURE_JAVA_HOME "${PROJECT_SOURCE_DIR}/.deps/jdk" CACHE PATH "Pinned JDK (python tools/bootstrap.py --jdk)")
-if(NOT EXISTS "${VENTURE_JAVA_HOME}/include/jni.h")
-  message(FATAL_ERROR "Missing JDK: run python tools/bootstrap.py --jdk")
+# VENTURE_JAVA_HOME is the target JDK: JNI headers, and the JVM staged beside
+# the runtime. VENTURE_HOST_JAVA_HOME runs javac/jar/java during the build; it
+# differs only when cross-compiling (python tools/bootstrap.py --jdk --target aarch64).
+if(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64")
+  set(venture_java_default "${PROJECT_SOURCE_DIR}/.deps/jdk-aarch64")
+else()
+  set(venture_java_default "${PROJECT_SOURCE_DIR}/.deps/jdk")
 endif()
+set(VENTURE_JAVA_HOME "${venture_java_default}" CACHE PATH "Pinned target JDK (python tools/bootstrap.py --jdk)")
+set(VENTURE_HOST_JAVA_HOME "${PROJECT_SOURCE_DIR}/.deps/jdk" CACHE PATH "Pinned build-host JDK (python tools/bootstrap.py --jdk)")
+foreach(home IN ITEMS "${VENTURE_JAVA_HOME}" "${VENTURE_HOST_JAVA_HOME}")
+  if(NOT EXISTS "${home}/include/jni.h")
+    message(FATAL_ERROR "Missing JDK ${home}: run python tools/bootstrap.py --jdk")
+  endif()
+endforeach()
 enable_language(ASM)
 if(WIN32)
   set(java_platform win32)
@@ -17,11 +28,16 @@ set_target_properties(venture_jvmti_agent PROPERTIES PREFIX "" OUTPUT_NAME "vent
 target_include_directories(venture_jvmti_agent PRIVATE "${VENTURE_JAVA_HOME}/include"
   "${VENTURE_JAVA_HOME}/include/${java_headers}")
 target_compile_options(venture_jvmti_agent PRIVATE -Wall -Wextra -Wpedantic)
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  set(java_entry java_entry_aarch64.S)
+else()
+  set(java_entry java_entry.S)
+endif()
 add_library(venture_java STATIC
   execution_freeze.cpp
   abi.cpp jvm.cpp guest_jni.cpp jni32.cpp native_bridge.cpp elf_exports.cpp conversion.cpp method_hooks.cpp
   ../platform/${java_platform}/java_host.cpp
-  ../platform/${java_platform}/java_entry.S)
+  ../platform/${java_platform}/${java_entry})
 target_include_directories(venture_java PUBLIC
   ${PROJECT_SOURCE_DIR}/src/runtime "${VENTURE_JAVA_HOME}/include")
 if(WIN32)
@@ -44,12 +60,12 @@ target_compile_options(venture_java PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-Wall;-Wex
 set(VENTURE_JAVA_BRIDGE_JAR "${CMAKE_CURRENT_BINARY_DIR}/venture-java-bridge.jar" CACHE INTERNAL "JNI support classes")
 set(venture_bridge_classes "${CMAKE_CURRENT_BINARY_DIR}/classes-venture")
 add_custom_command(OUTPUT "${VENTURE_JAVA_BRIDGE_JAR}"
-  COMMAND "${VENTURE_JAVA_HOME}/bin/javac${java_exe}" -encoding UTF-8 --release 21 -d "${venture_bridge_classes}"
+  COMMAND "${VENTURE_HOST_JAVA_HOME}/bin/javac${java_exe}" -encoding UTF-8 --release 21 -d "${venture_bridge_classes}"
     "${CMAKE_CURRENT_SOURCE_DIR}/bridge/com/venture/runtime/NativeLoader.java"
     "${CMAKE_CURRENT_SOURCE_DIR}/bridge/com/venture/runtime/NativeMethods.java"
     "${CMAKE_CURRENT_SOURCE_DIR}/bridge/com/venture/runtime/MethodHooks.java"
     "${CMAKE_CURRENT_SOURCE_DIR}/bridge/com/venture/runtime/DirectBuffers.java"
-  COMMAND "${VENTURE_JAVA_HOME}/bin/jar${java_exe}" --create --file "${VENTURE_JAVA_BRIDGE_JAR}" -C "${venture_bridge_classes}" .
+  COMMAND "${VENTURE_HOST_JAVA_HOME}/bin/jar${java_exe}" --create --file "${VENTURE_JAVA_BRIDGE_JAR}" -C "${venture_bridge_classes}" .
   DEPENDS bridge/com/venture/runtime/NativeLoader.java bridge/com/venture/runtime/NativeMethods.java
     bridge/com/venture/runtime/MethodHooks.java bridge/com/venture/runtime/DirectBuffers.java VERBATIM)
 add_custom_target(venture_java_bridge_jar ALL DEPENDS "${VENTURE_JAVA_BRIDGE_JAR}")

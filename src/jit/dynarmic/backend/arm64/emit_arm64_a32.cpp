@@ -82,6 +82,11 @@ void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::Li
 }
 
 void EmitA32Terminal(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Term::LinkBlockFast terminal, IR::LocationDescriptor initial_location, bool is_single_step) {
+    // Every cycle of linked blocks has a backward edge: backward and self links poll halts.
+    if (A32::LocationDescriptor{terminal.next}.PC() <= A32::LocationDescriptor{initial_location}.PC()) {
+        return EmitA32Terminal(code, ctx, IR::Term::LinkBlock{terminal.next}, initial_location, is_single_step);
+    }
+
     EmitSetUpperLocationDescriptor(code, ctx, terminal.next, initial_location);
 
     if (ctx.conf.HasOptimization(OptimizationFlag::BlockLinking) && !is_single_step) {
@@ -192,8 +197,8 @@ void EmitA32CheckMemoryAbort(oaknut::CodeGenerator& code, EmitContext& ctx, IR::
 
     const A32::LocationDescriptor current_location{IR::LocationDescriptor{inst->GetArg(0).GetU64()}};
 
-    code.LDAR(Xscratch0, Xhalt);
-    code.TST(Xscratch0, static_cast<u32>(HaltReason::MemoryAbort));
+    code.LDAR(Wscratch0, Xhalt);
+    code.TST(Wscratch0, static_cast<u32>(HaltReason::MemoryAbort));
     code.B(EQ, end);
     EmitSetUpperLocationDescriptor(code, ctx, current_location, ctx.block.Location());
     code.MOV(Wscratch0, current_location.PC());
@@ -610,6 +615,8 @@ void EmitIR<IR::Opcode::A32UpdateUpperLocationDescriptor>(oaknut::CodeGenerator&
 template<>
 void EmitIR<IR::Opcode::A32CallSupervisor>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
     auto args = ctx.reg_alloc.GetArgumentInfo(inst);
+    ASSERT(args[0].IsImmediate());
+    const u32 imm = args[0].GetImmediateU32();
     ctx.reg_alloc.PrepareForCall();
 
     if (ctx.conf.enable_cycle_counting) {
@@ -618,8 +625,24 @@ void EmitIR<IR::Opcode::A32CallSupervisor>(oaknut::CodeGenerator& code, EmitCont
         EmitRelocation(code, ctx, LinkTarget::AddTicks);
     }
 
-    code.MOV(W1, args[0].GetImmediateU32());
-    EmitRelocation(code, ctx, LinkTarget::CallSVC);
+    // Fast calls continue at the next instruction without leaving Run (the block's
+    // CheckHalt terminal exits on a halt). As on x64, svc_fast keeps the guest FP
+    // environment only when svc_fp_transfer names the calls that need the host's.
+    const auto& conf = ctx.conf;
+    const bool transfer_fp = conf.svc_fp_transfer && imm == *conf.svc_fp_transfer;
+    const bool fast_svc = transfer_fp || (conf.svc_fast && imm == *conf.svc_fast);
+    const bool host_fp = transfer_fp || conf.enable_cycle_counting || !conf.svc_fp_transfer;
+    const void* const known = fast_svc && conf.svc_lookup ? conf.svc_lookup(A32::LocationDescriptor{ctx.block.Location()}.PC(), imm) : nullptr;
+    code.MOV(W1, imm);
+    if (known) {
+        code.MOV(X2, std::bit_cast<u64>(known));
+        code.MOV(X3, Xstate);
+        EmitRelocation(code, ctx, host_fp ? LinkTarget::CallSVCFastKnownHostFp : LinkTarget::CallSVCFastKnown);
+    } else if (fast_svc) {
+        EmitRelocation(code, ctx, host_fp ? LinkTarget::CallSVCFastHostFp : LinkTarget::CallSVCFast);
+    } else {
+        EmitRelocation(code, ctx, LinkTarget::CallSVC);
+    }
 
     if (ctx.conf.enable_cycle_counting) {
         EmitRelocation(code, ctx, LinkTarget::GetTicksRemaining);

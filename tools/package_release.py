@@ -24,13 +24,18 @@ NOTICES = {
     "freetype": ["docs/FTL.TXT", "LICENSE.TXT"], "webp": ["COPYING", "PATENTS"],
     "stb": ["LICENSE"], "nanosvg": ["LICENSE.txt"], "openxr_sdk": ["LICENSE"],
     "zlib": ["LICENSE"], "boost_headers": ["LICENSE_1_0.txt"],
-    "fmt": ["LICENSE"], "mcl": ["LICENSE"], "xbyak": ["COPYRIGHT"], "robin_map": ["LICENSE"],
+    "fmt": ["LICENSE"], "mcl": ["LICENSE"], "robin_map": ["LICENSE"],
     "miniz": ["LICENSE"], "mimalloc": ["LICENSE"],
     "venture_astcenc": ["LICENSE.txt"], "utf8proc": ["LICENSE.md"],
     "venture_vulkan_headers": ["LICENSES/Apache-2.0.txt", "LICENSES/MIT.txt"], "venture_xr_headers": ["LICENSE"],
 }
+# The JIT's code emitter for the host architecture (src/jit/CMakeLists.txt).
+JIT_EMITTER_NOTICES = {"x86_64": {"xbyak": ["COPYRIGHT"]}, "aarch64": {"oaknut": ["LICENSE"]}}
 # Sources kept in the repository (xbyak carries Venture's dual-mapping change).
 IN_TREE = {"xbyak": ROOT / "src/jit/xbyak"}
+# ELF e_machine values of the supported Linux hosts, and their release layout names.
+ELF_MACHINES = {62: "x86_64", 183: "aarch64"}
+LINUX_LAYOUTS = {"x86_64": "Venture-linux64", "aarch64": "Venture-linux-aarch64"}
 # ANGLE Vulkan backend: linked dependencies/headers, excluding its test suites,
 # source generators, desktop GL and window-system backends, OpenCL and toolchain
 # dependencies.
@@ -291,26 +296,45 @@ def headless_jre(build, jdk):
     copy(fonts / "LICENSE", jdk.parent.parent / "licenses/dejavu-fonts/LICENSE")
 
 
-def static_runtime_notices(build, output):
+def static_runtime_notices(build, output, sysroot):
     """Notices for system libraries linked statically by the Linux baseline
-    toolchain (cmake/toolchains/linux-baseline.cmake): OpenSSL and libc++."""
+    toolchains (cmake/toolchains/linux-baseline.cmake, linux-aarch64.cmake):
+    OpenSSL and libc++, from the system or sysroot they were linked from."""
+    docs = sysroot / "usr/share/doc"
     cache = (build / "CMakeCache.txt").read_text(encoding="utf-8") if (build / "CMakeCache.txt").is_file() else ""
     crypto = re.search(r"^OPENSSL_CRYPTO_LIBRARY:FILEPATH=(.*)$", cache, re.M)
     if crypto and crypto.group(1).endswith(".a"):
-        candidates = [Path("/usr/share/doc") / name / "copyright" for name in ("libssl-dev", "libssl3", "openssl")]
+        candidates = [docs / name / "copyright" for name in ("libssl-dev", "libssl3", "openssl")]
         candidates.append(Path(crypto.group(1)).parent.parent / "share/doc/openssl/LICENSE.txt")
         source = next((p for p in candidates if p.is_file()), None)
         if source is None:
             raise RuntimeError("OpenSSL is linked statically but its license was not found")
         copy(source, output / "licenses/openssl" / ("LICENSE.txt" if source.suffix == ".txt" else "copyright"))
     if "-static-libstdc++" in cache and "-stdlib=libc++" in cache:
-        llvm = sorted(Path("/usr/share/doc").glob("libc++*-dev/copyright"))
+        llvm = sorted(docs.glob("libc++*-dev/copyright"))
         if not llvm:
             raise RuntimeError("libc++ is linked statically but its license was not found")
         copy(llvm[-1], output / "licenses/llvm-runtime/copyright")
 
 
-def package(build, output, angle, strip, readobj):
+def elf_machine(path):
+    """The architecture of an ELF file (ELF_MACHINES), or None for other files."""
+    with open(path, "rb") as file:
+        header = file.read(20)
+    if len(header) < 20 or header[:4] != b"\x7fELF":
+        return None
+    machine = struct.unpack_from("<H" if header[5] == 1 else ">H", header, 18)[0]
+    return ELF_MACHINES.get(machine, "ELF machine %d" % machine)
+
+
+def check_elf_machines(layout, arch):
+    """Every native file of a Linux layout (the JRE, ANGLE, FFmpeg, ...) runs on arch."""
+    for path in sorted(Path(layout).rglob("*")):
+        if path.is_file() and (machine := elf_machine(path)) not in (None, arch):
+            raise RuntimeError(f"{path.relative_to(layout).as_posix()} is built for {machine}, not {arch}")
+
+
+def package(build, output, angle, strip, readobj, jdk, host_jdk, sysroot):
     if output.exists():
         for current, dirs, files in os.walk(output, followlinks=False):
             for name in dirs + files:
@@ -340,6 +364,10 @@ def package(build, output, angle, strip, readobj):
     suffix = ".exe" if windows else ""
     names = ["venture" + suffix, "venture-runtime" + suffix, "venture-framework.jar",
              "venture-java-bridge.jar"]
+    # Windows releases are x64; a Linux layout ships for the architecture its runtime was built for.
+    arch = "x86_64" if windows else elf_machine(bin_dir / "venture-runtime")
+    if arch not in LINUX_LAYOUTS:
+        raise RuntimeError(f"Unsupported release architecture: {arch}")
     names += ["WebView2Loader.dll", "libEGL.dll", "libGLESv2.dll"] if windows else ["libEGL.so", "libGLESv2.so"]
     names += ["avutil-60.dll", "avcodec-62.dll", "avformat-62.dll", "swscale-9.dll"] if windows else [
         "libavutil.so.60", "libavcodec.so.62", "libavformat.so.62", "libswscale.so.9"]
@@ -361,7 +389,7 @@ def package(build, output, angle, strip, readobj):
         tree(bin_dir / "java" / name, output / "java" / name)
     # jdeps follows all compiled driver classes and recursively resolves the
     # reachable library classes. This excludes dex2jar's unused CLI/tool jars.
-    jdeps = ROOT / ".deps/jdk/bin" / ("jdeps.exe" if windows else "jdeps")
+    jdeps = host_jdk / "bin" / ("jdeps.exe" if windows else "jdeps")
     cp = os.pathsep.join([str(bin_dir / "java/asm/asm.jar"), str(bin_dir / "java/dex2jar/lib/*")])
     dependencies = subprocess.run([str(jdeps), "--multi-release", "21", "--recursive",
         "--class-path", cp, str(bin_dir / "java/dex/classes")],
@@ -378,7 +406,8 @@ def package(build, output, angle, strip, readobj):
     for name in ("LICENSE.txt", "NOTICE.txt"):
         copy(bin_dir / "java/dex2jar" / name, output / "java/dex2jar" / name)
     copy(bin_dir / "java/android-32.hierarchy.tsv", output / "java/android-32.hierarchy.tsv")
-    subprocess.run([sys.executable, str(ROOT / "tools/dex/make_jre.py"), str(output / "java/jdk")], check=True)
+    subprocess.run([sys.executable, str(ROOT / "tools/dex/make_jre.py"), "--jdk", str(jdk), "--host-jdk", str(host_jdk),
+                    str(output / "java/jdk")], check=True)
     # jlink links each module's legal notices to java.base's copies on POSIX.
     # The layout must stay link-free (repackaging and runtime bundles reject
     # links), so materialize them as regular files.
@@ -416,9 +445,9 @@ def package(build, output, angle, strip, readobj):
     if windows:
         copy(ROOT / ".deps/llvm-mingw/LICENSE.TXT", output / "licenses/llvm-runtime/LICENSE.TXT")
     else:
-        static_runtime_notices(build, output)
+        static_runtime_notices(build, output, sysroot)
     dependency_sources = configured_sources(build)
-    for component, files in NOTICES.items():
+    for component, files in {**NOTICES, **JIT_EMITTER_NOTICES[arch]}.items():
         fetched = dependency_sources.get(None, ROOT / ".deps/fetch") / (component + "-src")
         source_root = IN_TREE.get(component) or dependency_sources.get(component, fetched)
         for name in files:
@@ -439,6 +468,8 @@ def package(build, output, angle, strip, readobj):
         copy(webview2 / "LICENSE.txt", output / "licenses/webview2/LICENSE.txt")
         copy(webview2 / "NOTICE.txt", output / "licenses/webview2/NOTICE.txt")
         check_imports(output, readobj)
+    else:
+        check_elf_machines(output, arch)
     scan(output, *identity(build))
     files = {p.relative_to(output).as_posix(): {"bytes": p.stat().st_size, "sha256": hashlib.sha256(p.read_bytes()).hexdigest()}
              for p in sorted(output.rglob("*")) if p.is_file()}
@@ -453,9 +484,22 @@ def main():
     parser.add_argument("--angle", type=Path, required=True)
     parser.add_argument("--strip", type=Path, required=True)
     parser.add_argument("--readobj", type=Path)
+    parser.add_argument("--jdk", type=Path, default=ROOT / ".deps/jdk",
+                        help="target JDK: the shipped JRE's modules (VENTURE_JAVA_HOME)")
+    parser.add_argument("--host-jdk", type=Path, default=ROOT / ".deps/jdk",
+                        help="build-host JDK running jdeps and jlink (VENTURE_HOST_JAVA_HOME)")
+    parser.add_argument("--sysroot", type=Path, default=Path("/"),
+                        help="sysroot of a cross build, for statically linked libraries' notices")
     args = parser.parse_args()
-    output = args.output or ROOT / "dist" / ("Venture-win64" if os.name == "nt" else "Venture-linux64")
-    package(args.build.resolve(), output.resolve(), args.angle.resolve(), args.strip, args.readobj)
+    build = args.build.resolve()
+    if args.output:
+        output = args.output
+    elif os.name == "nt":
+        output = ROOT / "dist/Venture-win64"
+    else:
+        output = ROOT / "dist" / LINUX_LAYOUTS.get(elf_machine(build / "bin/venture-runtime"), "Venture-linux64")
+    package(build, output.resolve(), args.angle.resolve(), args.strip, args.readobj,
+            args.jdk.resolve(), args.host_jdk.resolve(), args.sysroot)
 
 
 if __name__ == "__main__":

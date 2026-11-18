@@ -1,0 +1,161 @@
+# Linux aarch64 (Steam Frame) release, cross-built on an x64 runner: the linux-aarch64 preset against the
+# glibc 2.35 arm64 sysroot of tools/linux-baseline/aarch64_sysroot.py, with the aarch64 JDK, FFmpeg and
+# ANGLE from tools/bootstrap.py --target aarch64 and tools/angle/build_angle.py --target-cpu arm64.
+# Build-time tools built for the target (glslang) run under user-mode QEMU. Tests are compiled and the
+# release layout is checked; the runtime suites need an arm64 machine with a GPU. Releases also make the
+# aarch64 packages. Called by release.yml.
+#
+# As in linux.yml, the toolchains (with FFmpeg), the sysroot and ANGLE are cached by their recipe and
+# saved as soon as they are built, FetchContent sources by the CMake files, and compiles go through ccache.
+name: Linux aarch64
+
+on:
+  workflow_call:
+    inputs:
+      test:
+        type: boolean
+        default: true
+      package:
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+env:
+  LLVM: 22
+  # Runners have no FUSE; AppImages (appimagetool) extract themselves instead.
+  APPIMAGE_EXTRACT_AND_RUN: 1
+  APPIMAGETOOL_URL: https://github.com/AppImage/appimagetool/releases/download/1.9.1/appimagetool-x86_64.AppImage
+  APPIMAGETOOL_SHA256: ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0
+  CCACHE_KEY: linux-aarch64-ccache-${{ inputs.package && 'release' || 'ci' }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v5
+      # hashFiles and the runner context only exist inside steps.
+      - name: Cache keys
+        run: |
+          {
+            echo "DEPS_KEY=linux-aarch64-deps-${{ hashFiles('tools/linux-baseline/aarch64_sysroot.py', 'tools/bootstrap.py', 'tools/bootstrap_framework.py', 'tools/ffmpeg/**', 'tools/dex/**', 'tools/angle/**') }}"
+            echo "FETCH_KEY=linux-aarch64-fetch-${{ hashFiles('CMakeLists.txt', 'cmake/**', 'src/**/CMakeLists.txt', 'third_party/**/CMakeLists.txt') }}"
+            echo "CACHE_ARGS=-DVENTURE_AGENT_CACHE=ON -DVENTURE_AGENT_CACHE_ROOT=$RUNNER_TEMP -DVENTURE_CCACHE_MAX_SIZE=3GiB"
+            # Toolchain, JDK, FFmpeg and ANGLE caches in the checkout, where the cache steps find them.
+            echo "VENTURE_DATA_DIR=$GITHUB_WORKSPACE/.deps/aarch64-data"
+          } >> "$GITHUB_ENV"
+
+      # clang/lld/llvm >= 21 from apt.llvm.org (noble ships 18), wayland-scanner for SDL's Wayland
+      # protocols, QEMU for target tools run during the build, zstd for the sysroot's packages.
+      - name: Host tools
+        run: |
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-$LLVM main" |
+            sudo tee /etc/apt/sources.list.d/llvm.list
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends clang-$LLVM lld-$LLVM llvm-$LLVM \
+            libwayland-bin qemu-user-static pkg-config make zstd gpgv xz-utils
+          echo "/usr/lib/llvm-$LLVM/bin" >> "$GITHUB_PATH"
+
+      - name: Restore dependencies
+        id: deps
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .deps/aarch64-data/dev-cache/toolchains
+            .deps/aarch64-data/dev-cache/angle/prebuilt
+            .deps/sysroot-aarch64
+          key: ${{ env.DEPS_KEY }}
+      - name: Restore FetchContent sources
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .deps/fetch
+            !.deps/fetch/*-build
+          key: ${{ env.FETCH_KEY }}
+          restore-keys: |
+            linux-aarch64-fetch-
+            linux-fetch-
+      - name: Restore compiler cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ env.CCACHE_KEY }}-${{ github.run_id }}
+          restore-keys: |
+            linux-aarch64-ccache-ci-
+            linux-aarch64-ccache-release-
+
+      # The host's toolchain and JDK, the aarch64 sysroot, JDK and FFmpeg; then ANGLE for arm64 only.
+      - name: Bootstrap (toolchain, JDKs, sysroot, FFmpeg, ccache) and ANGLE
+        run: |
+          python3 tools/bootstrap.py --jdk --ccache --target aarch64
+          python3 tools/angle/build_angle.py --target-cpu arm64 --jobs 4
+      # Saved right away, so a later failure never throws away a multi-hour ANGLE build.
+      - name: Save dependencies
+        if: steps.deps.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .deps/aarch64-data/dev-cache/toolchains
+            .deps/aarch64-data/dev-cache/angle/prebuilt
+            .deps/sysroot-aarch64
+          key: ${{ env.DEPS_KEY }}
+
+      - name: Build
+        run: |
+          export PATH="$GITHUB_WORKSPACE/.deps/cmake/bin:$GITHUB_WORKSPACE/.deps/ninja:$PATH"
+          cmake --preset linux-aarch64 $CACHE_ARGS -DVENTURE_BUILD_TESTS=${{ inputs.test && 'ON' || 'OFF' }}
+          cmake --build --preset linux-aarch64 -j 4 --target all package-release
+      - name: Test
+        if: inputs.test
+        # As linux.yml: a release still builds its packages when a test fails; the failure stays reported.
+        continue-on-error: ${{ inputs.package }}
+        run: |
+          export PATH="$GITHUB_WORKSPACE/.deps/cmake/bin:$PATH"
+          ctest --test-dir build/linux-aarch64 -R '^release_layout$' --timeout 900 --output-on-failure
+
+      - name: Save FetchContent sources
+        if: always()
+        continue-on-error: true  # the key already exists when the CMake files did not change
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .deps/fetch
+            !.deps/fetch/*-build
+          key: ${{ env.FETCH_KEY }}
+      - name: Save compiler cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: ${{ env.CCACHE_KEY }}-${{ github.run_id }}
+
+      # appimagetool runs on the host and fetches the aarch64 AppImage runtime itself (ARCH=aarch64); the
+      # Flatpak is assembled against the aarch64 GNOME runtime without running it.
+      - name: Packaging tools
+        if: inputs.package
+        run: |
+          sudo apt-get install -y -q flatpak ostree librsvg2-common
+          flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
+          flatpak install --user -y --noninteractive --arch=aarch64 flathub org.gnome.Platform//51
+          curl -fsSL -o "$RUNNER_TEMP/appimagetool" "$APPIMAGETOOL_URL"
+          echo "$APPIMAGETOOL_SHA256  $RUNNER_TEMP/appimagetool" | sha256sum -c -
+          chmod +x "$RUNNER_TEMP/appimagetool"
+          echo "APPIMAGETOOL=$RUNNER_TEMP/appimagetool" >> "$GITHUB_ENV"
+      # dpkg-deb from a stock jammy image: this job builds no baseline image.
+      - name: Packages
+        if: inputs.package
+        env:
+          VENTURE_BASELINE_IMAGE: docker.io/library/ubuntu:22.04
+        run: tools/packaging/linux/build_packages.sh --arch aarch64 --out dist/packages
+      - uses: actions/upload-artifact@v4
+        if: inputs.package
+        with:
+          name: linux-aarch64
+          path: dist/packages/Venture-*
+          if-no-files-found: error
+          compression-level: 0

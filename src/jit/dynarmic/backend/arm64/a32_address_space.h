@@ -30,6 +30,9 @@ protected:
     void EmitPrelude();
     EmitConfig GetEmitConfig() override;
     void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) override;
+    std::pair<u64, bool> DescribeLocation(IR::LocationDescriptor descriptor) const override;
+    void EmitLoadGuestFpcr(oaknut::WReg dest) override;
+    std::size_t GuestFpsrOffset() const override;
 
     const A32::UserConfig conf;
     BlockRangeInformation<u32> block_ranges;

@@ -33,7 +33,7 @@ endif()
 set(media_generated ${CMAKE_CURRENT_BINARY_DIR}/generated)
 add_custom_command(OUTPUT ${media_generated}/yuv_rgba_comp.inc
   COMMAND ${CMAKE_COMMAND} -E make_directory ${media_generated}
-  COMMAND $<TARGET_FILE:glslang-standalone> -V --target-env vulkan1.3
+  COMMAND glslang-standalone -V --target-env vulkan1.3
     ${PROJECT_SOURCE_DIR}/src/runtime/media/shaders/yuv_rgba.comp -o ${media_generated}/yuv_rgba_comp.spv
   COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/codegen/vk_spirv.py
     ${media_generated}/yuv_rgba_comp.spv ${media_generated}/yuv_rgba_comp.inc

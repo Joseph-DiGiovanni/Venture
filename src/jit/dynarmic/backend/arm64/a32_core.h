@@ -25,6 +25,15 @@ public:
         const auto entry_point = process.GetOrEmit(location_descriptor);
         return process.prelude_info.step_code(entry_point, &thread_ctx, halt_reason);
     }
+
+    // Venture: code-cache queries for A32::Jit (Precompile, CodeCacheBegin).
+    static const void* CodeCacheBegin(const A32AddressSpace& process) {
+        return process.mem.ptr();
+    }
+
+    static std::size_t CodeCacheRemaining(A32AddressSpace& process) {
+        return process.GetRemainingSize();
+    }
 };
 
 }  // namespace Dynarmic::Backend::Arm64

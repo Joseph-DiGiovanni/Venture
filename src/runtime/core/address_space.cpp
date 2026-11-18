@@ -39,7 +39,7 @@ struct State {
   bool maps_dirty = true;
   std::size_t logged_regions = 512;  // the next region count worth a log line
   std::atomic<std::uint64_t> stack_limit{kDefaultStackLimit};
-  static constexpr std::uint64_t arena_size = 1ull << 40;
+  std::uint64_t arena_size = 0;
 };
 State& state() { static auto* s = new State; return *s; }
 // Republishes the lock-free snapshot after a change confined to [lo, hi).
@@ -151,15 +151,35 @@ void reserve_arena(State& s) {
   // 16 TiB: above where Windows places heaps and mapped views at random (about
   // 1-3 TiB) and below top-down allocations and images; Linux places nothing
   // there either. Later fixed candidates keep the address stable if it is taken.
-  for (const GuestAddr candidate : {0x100000000000ull, 0x110000000000ull, 0x120000000000ull, 0x130000000000ull}) {
-    s.arena = platform::reserve(candidate, State::arena_size, true);
-    if (s.arena) break;
-    log::info("memory", "A64 guest arena candidate {:#x} unavailable: {}", candidate, platform::first_mapping(candidate, State::arena_size));
+  // A 39-bit-VA arm64 kernel (512 GiB, as on a Quest) has no room there; its
+  // smaller arenas lie between the A32 low arena and the PIE image. x64 keeps
+  // the 1 TiB arena: a smaller one would shrink library_slot's slot count.
+  struct Candidate { GuestAddr address; std::uint64_t size; };
+  constexpr std::uint64_t large = 1ull << 40;
+#if defined(__aarch64__)
+  constexpr std::uint64_t small = 128ull << 30;
+  constexpr Candidate candidates[]{{0x100000000000ull, large}, {0x110000000000ull, large},
+                                   {0x120000000000ull, large}, {0x130000000000ull, large},
+                                   {0x3000000000ull, small}, {0x800000000ull, small / 2}};
+  constexpr std::uint64_t anywhere[]{large, small};
+#else
+  constexpr Candidate candidates[]{{0x100000000000ull, large}, {0x110000000000ull, large},
+                                   {0x120000000000ull, large}, {0x130000000000ull, large}};
+  constexpr std::uint64_t anywhere[]{large};
+#endif
+  for (const auto [candidate, size] : candidates) {
+    s.arena = platform::reserve(candidate, size, true);
+    if (s.arena) { s.arena_size = size; break; }
+    log::info("memory", "A64 guest arena candidate {:#x} unavailable: {}", candidate, platform::first_mapping(candidate, size));
   }
-  if (!s.arena) s.arena = platform::reserve(0, State::arena_size, false);
+  for (const auto size : anywhere) {
+    if (s.arena) break;
+    s.arena = platform::reserve(0, size, false);
+    if (s.arena) s.arena_size = size;
+  }
   if (s.arena) {
-    s.reservations.push_back({s.arena, State::arena_size});
-    log::info("memory", "A64 guest arena [{:#x}, {:#x})", s.arena, s.arena + State::arena_size);
+    s.reservations.push_back({s.arena, s.arena_size});
+    log::info("memory", "A64 guest arena [{:#x}, {:#x})", s.arena, s.arena + s.arena_size);
   }
 }
 GuestAddr choose(State& s, std::uint64_t size, std::uint64_t alignment, bool grow_down = false) {
@@ -169,7 +189,7 @@ GuestAddr choose(State& s, std::uint64_t size, std::uint64_t alignment, bool gro
     if (grow_down) {
       // Put grow-down VMAs at the high end of a hole. Bottom-up packing would
       // leave exactly stack_guard_gap below them and forbid their first growth.
-      auto top = s.arena + State::arena_size;
+      auto top = s.arena + s.arena_size;
       for (auto it = s.regions.rbegin(); it != s.regions.rend(); ++it) {
         const auto& r = it->second;
         if (r.start >= top) { top = std::min(top, r.gap_start()); continue; }
@@ -187,11 +207,11 @@ GuestAddr choose(State& s, std::uint64_t size, std::uint64_t alignment, bool gro
       }
     }
     auto p = align_up(s.arena + below, alignment);
-    for (auto it = s.regions.lower_bound(s.arena); it != s.regions.end() && it->first < s.arena + State::arena_size; ++it) {
+    for (auto it = s.regions.lower_bound(s.arena); it != s.regions.end() && it->first < s.arena + s.arena_size; ++it) {
       if (p + size <= it->second.gap_start()) break;
       p = align_up(it->first + it->second.size + below, alignment);
     }
-    if (p <= s.arena + State::arena_size && size <= s.arena + State::arena_size - p) return p;
+    if (p <= s.arena + s.arena_size && size <= s.arena + s.arena_size - p) return p;
   }
   auto reserve_size = align_up(size + alignment + below, platform::reservation_granularity());
   auto p = platform::reserve(0, reserve_size, false);
@@ -492,16 +512,16 @@ GuestAddr AddressSpace::allocate_preferred(GuestAddr preferred, std::uint64_t si
   s.allocations.emplace(p, align_up(size, 4096)); return p;
 }
 GuestAddr AddressSpace::library_slot(std::string_view soname, std::uint64_t size, std::uint64_t alignment) {
-  // 64 slots of 4 GiB from a quarter into the arena: first-fit allocation
-  // fills from its bottom and grow-down regions take its top.
-  constexpr std::uint64_t slot_size = 4ull << 30, slots = 64;
+  // 4 GiB slots over the arena's second quarter (64 in a 1 TiB arena):
+  // first-fit allocation fills from its bottom and grow-down regions take its top.
+  constexpr std::uint64_t slot_size = 4ull << 30;
   if (a32_policy || size > slot_size || !alignment || alignment > slot_size) return 0;
   std::uint64_t hash = 0xcbf29ce484222325ull;
   for (const char c : soname) hash = (hash ^ std::uint8_t(c)) * 0x100000001b3ull;
   auto& s = state();
   { profile::TimedLock lock(s.mutex); reserve_arena(s); }
   if (!s.arena) return 0;
-  return s.arena + State::arena_size / 4 + (hash % slots) * slot_size;
+  return s.arena + s.arena_size / 4 + (hash % (s.arena_size / 4 / slot_size)) * slot_size;
 }
 GuestAddr AddressSpace::allocate_at(GuestAddr address, std::uint64_t size, std::uint32_t prot, std::string_view name) {
   if (a32_policy) return 0;

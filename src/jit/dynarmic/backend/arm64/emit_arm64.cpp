@@ -204,6 +204,14 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
     EmitContext ctx{block, reg_alloc, conf, ebi, fpsr_manager, fastmem_manager, {}};
 
     ebi.entry_point = code.xptr<CodePtr>();
+    if (conf.diagnostic_entry) {
+        if (const auto pc = conf.diagnostic_entry(block.Location())) {
+            // Entry has no allocated IR temporaries and every guest register is in the JitState.
+            code.MOV(X1, *pc);
+            code.MOV(X2, Xstate);
+            EmitRelocation(code, ctx, LinkTarget::DiagnosticEntry);
+        }
+    }
 
     if (ctx.block.GetCondition() == IR::Cond::AL) {
         ASSERT(!ctx.block.HasConditionFailedLocation());
@@ -258,7 +266,9 @@ EmittedBlockInfo EmitArm64(oaknut::CodeGenerator& code, IR::Block block, const E
     conf.emit_terminal(code, ctx);
     code.BRK(0);
 
-    for (const auto& deferred_emit : ctx.deferred_emits) {
+    // A deferred emit may defer another (an abort exit).
+    for (std::size_t i = 0; i < ctx.deferred_emits.size(); ++i) {
+        const auto deferred_emit = std::move(ctx.deferred_emits[i]);
         deferred_emit();
     }
     code.BRK(0);

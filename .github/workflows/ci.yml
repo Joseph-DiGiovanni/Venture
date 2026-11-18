@@ -1,4 +1,4 @@
-# Builds and tests every push to main and every pull request on Windows and Linux.
+# Builds and tests every push to main and every pull request on Windows, Linux x64 and Linux aarch64 (cross-built).
 name: CI
 
 # Changes that only touch documentation or issue templates build nothing.
@@ -25,3 +25,6 @@ jobs:
   linux:
     if: github.repository == 'Villagers654/Venture'
     uses: ./.github/workflows/linux.yml
+  linux-aarch64:
+    if: github.repository == 'Villagers654/Venture'
+    uses: ./.github/workflows/linux-aarch64.yml

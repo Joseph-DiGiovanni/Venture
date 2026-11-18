@@ -75,8 +75,12 @@ if(NOT WIN32)
 endif()
 # The ordinary launch path loads ANGLE from the executable directory. Stage the
 # provisioned, pinned runtime so a fresh build works without a developer env var.
-set(VENTURE_ANGLE_ROOT "${PROJECT_SOURCE_DIR}/.deps/angle/d2e5e488da0c6215f8276e5b8d992a4a6ec20c32"
-    CACHE PATH "Installed Venture ANGLE dependency")
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64")
+  set(venture_angle_default "${PROJECT_SOURCE_DIR}/.deps/angle/d2e5e488da0c6215f8276e5b8d992a4a6ec20c32-arm64")
+else()
+  set(venture_angle_default "${PROJECT_SOURCE_DIR}/.deps/angle/d2e5e488da0c6215f8276e5b8d992a4a6ec20c32")
+endif()
+set(VENTURE_ANGLE_ROOT "${venture_angle_default}" CACHE PATH "Installed Venture ANGLE dependency")
 if(WIN32)
   set(venture_angle_libraries libEGL.dll libGLESv2.dll)
 else()
@@ -105,9 +109,9 @@ add_custom_command(TARGET venture-runtime POST_BUILD
     "$<TARGET_FILE_DIR:venture-runtime>/LICENSES/LGPL-2.1.txt"
   COMMAND ${CMAKE_COMMAND} -E copy_if_different "${VENTURE_FFMPEG_ROOT}/venture-ffmpeg.json"
     "$<TARGET_FILE_DIR:venture-runtime>/venture-ffmpeg.json"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/.deps/ffmpeg/archive/ffmpeg-8.1.3.tar.xz"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${VENTURE_FFMPEG_BUNDLE}/archive/ffmpeg-8.1.3.tar.xz"
     "$<TARGET_FILE_DIR:venture-runtime>/LICENSES/ffmpeg-8.1.3.tar.xz"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${PROJECT_SOURCE_DIR}/.deps/ffmpeg/signature/release.asc"
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${VENTURE_FFMPEG_BUNDLE}/signature/release.asc"
     "$<TARGET_FILE_DIR:venture-runtime>/LICENSES/ffmpeg-8.1.3.tar.xz.asc" VERBATIM)
 target_link_libraries(venture-runtime PRIVATE venture_common)
 target_link_libraries(venture-runtime PRIVATE venture_steam)
@@ -170,7 +174,7 @@ target_link_libraries(venture-runtime PRIVATE venture_vulkan)
 # layout documented in java/support_files.h. --java-home still overrides it.
 set(VENTURE_GUEST_TEST_JAVA_CLASSES "${PROJECT_BINARY_DIR}/guest/java-classes")
 add_custom_command(OUTPUT "${VENTURE_GUEST_TEST_JAVA_CLASSES}/org/venture/tests/VtestJni.class"
-  COMMAND "${VENTURE_JAVA_HOME}/bin/javac" --release 21 -d "${VENTURE_GUEST_TEST_JAVA_CLASSES}"
+  COMMAND "${VENTURE_HOST_JAVA_HOME}/bin/javac" --release 21 -d "${VENTURE_GUEST_TEST_JAVA_CLASSES}"
     "${PROJECT_SOURCE_DIR}/tests/guest/java/VtestJni.java"
   DEPENDS "${PROJECT_SOURCE_DIR}/tests/guest/java/VtestJni.java" VERBATIM)
 add_custom_command(OUTPUT "${CMAKE_BINARY_DIR}/bin/guest/java-classes/org/venture/tests/VtestJni.class"
@@ -193,7 +197,8 @@ if(NOT TARGET Python3::Interpreter)
 endif()
 add_custom_target(venture_java_support ALL
   COMMAND "${Python3_EXECUTABLE}" "${PROJECT_SOURCE_DIR}/tools/dex/stage_runtime.py"
-    --bin "$<TARGET_FILE_DIR:venture-runtime>" --jdk "${VENTURE_JAVA_HOME}" --bridge "${VENTURE_JAVA_BRIDGE_JAR}"
+    --bin "$<TARGET_FILE_DIR:venture-runtime>" --jdk "${VENTURE_JAVA_HOME}" --host-jdk "${VENTURE_HOST_JAVA_HOME}"
+    --bridge "${VENTURE_JAVA_BRIDGE_JAR}"
     --agent "$<TARGET_FILE:venture_jvmti_agent>"
   DEPENDS venture_java_bridge_jar venture-framework venture_jvmti_agent VERBATIM)
 add_dependencies(venture-runtime venture_java_support)

@@ -1,4 +1,5 @@
-# Flatpak of the baseline release layout (build_packages.sh flatpak).
+# Flatpak of the baseline release layout (build_packages.sh [--arch aarch64] flatpak;
+# flatpak-builder --arch=x86_64|aarch64 with that architecture's layout as src/venture).
 # OpenXR: the bundled loader reaches the host runtime through
 # venture-flatpak.sh; see docs/LINUX_RELEASE_BUILD.md ("Flatpak and OpenXR").
 # The GNOME runtime (freedesktop 26.08 underneath) carries WebKitGTK 6.0 for

@@ -142,6 +142,47 @@ struct Jit::Impl final {
         return {};
     }
 
+    const void* CodeCacheBegin() const {
+        return A64Core::CodeCacheBegin(current_address_space);
+    }
+
+    std::size_t CodeCacheSize() const {
+        return conf.code_cache_size;
+    }
+
+    bool Precompile(u64 value) {
+        if (is_executing)
+            return false;
+        PerformRequestedCacheInvalidation(static_cast<HaltReason>(Atomic::Load(&halt_reason)));
+        const IR::LocationDescriptor descriptor{value};
+        if (current_address_space.Get(descriptor))
+            return true;
+        // Do not evict demand-compiled blocks to warm a speculative descriptor.
+        if (A64Core::CodeCacheRemaining(current_address_space) < 4 * 1024 * 1024)
+            return false;
+        try {
+            current_address_space.GetOrEmit(descriptor);
+        } catch (...) {
+            // Run services this invalidation before executing any block.
+            ClearCache();
+            throw;
+        }
+        return true;
+    }
+
+    // The arm64 backend has no portable block source: nothing is installed while the guest waits.
+    bool PrecompileIdle(u64 value) {
+        if (Atomic::Load(&halt_reason) != 0)
+            return false;
+        if (current_address_space.Get(IR::LocationDescriptor{value}))
+            return true;
+        return A64Core::CodeCacheRemaining(current_address_space) >= 16 * 1024 * 1024;
+    }
+
+    void ReserveBlocks(std::size_t count) {
+        A64Core::ReserveBlocks(current_address_space, count);
+    }
+
 private:
     void PerformRequestedCacheInvalidation(HaltReason hr) {
         if (Has(hr, HaltReason::CacheInvalidation)) {
@@ -300,6 +341,26 @@ bool Jit::IsExecuting() const {
 
 std::string Jit::Disassemble() const {
     return impl->Disassemble();
+}
+
+const void* Jit::CodeCacheBegin() const {
+    return impl->CodeCacheBegin();
+}
+
+std::size_t Jit::CodeCacheSize() const {
+    return impl->CodeCacheSize();
+}
+
+bool Jit::Precompile(std::uint64_t descriptor) {
+    return impl->Precompile(descriptor);
+}
+
+bool Jit::PrecompileIdle(std::uint64_t descriptor) {
+    return impl->PrecompileIdle(descriptor);
+}
+
+void Jit::ReserveBlocks(std::size_t count) {
+    impl->ReserveBlocks(count);
 }
 
 }  // namespace Dynarmic::A64

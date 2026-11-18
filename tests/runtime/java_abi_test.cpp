@@ -34,6 +34,44 @@ TEST_CASE("A @CriticalNative guest native gets its parameters without JNIEnv* an
   CHECK(std::bit_cast<std::uint64_t>(mixed.doubles[0]) == std::bit_cast<std::uint32_t>(1.5f));
   CHECK(mixed.doubles[1] == 2.5);
 }
+TEST_CASE("AAPCS64 JNI decoding allocates 8 GP and 8 FP registers independently, then ordered 8-byte slots") {
+  // (IJIJIJ J FDFDFDFD F I D)V: x2-x7 then one GP spill; d0-d7 then FP/GP spills interleaved.
+  const auto d = Descriptor::parse("(IJIJIJJFDFDFDFDFID)V");
+  std::uint64_t gp[8]{0x1000, 0x2000, 0xffffffff'80000001, 2, 0x1'00000003, 4, 5, 6};
+  std::uint64_t fp[8];
+  for (unsigned i = 0; i < 8; ++i)
+    fp[i] = i % 2 ? std::bit_cast<std::uint64_t>(i + 0.5)
+                  : 0xdead'0000'0000'0000 | std::bit_cast<std::uint32_t>(i + 0.25f);  // upper bits undefined
+  std::uint64_t stack[4]{7, 0xbeef'0000'0000'0000 | std::bit_cast<std::uint32_t>(8.25f), 0x1234'fffffffe,
+                         std::bit_cast<std::uint64_t>(9.5)};
+  const HostRegisters host(gp, fp, stack);
+  const auto args = native_arguments(d, host, HostAbi::Aapcs64, 0xe000);
+  CHECK(args.integers == std::vector<std::uint64_t>{0xe000, 0x2000, 0xffffffff'80000001, 2, 3, 4, 5, 6});
+  REQUIRE(args.doubles.size() == 8);
+  for (unsigned i = 0; i < 8; ++i)
+    CHECK(std::bit_cast<std::uint64_t>(args.doubles[i]) == (i % 2 ? fp[i] : (fp[i] & 0xffffffff)));
+  CHECK(args.stack == std::vector<std::uint64_t>{7, std::bit_cast<std::uint32_t>(8.25f), 0xffffffff'fffffffe,
+                                                 std::bit_cast<std::uint64_t>(9.5)});
+  // SysV stops at 6 GP registers: the fifth parameter already spills.
+  std::uint64_t sysv_stack[5]{0x1'00000005, 6, 7, std::bit_cast<std::uint32_t>(8.25f), 0xfffffffe};
+  const auto sysv = native_arguments(Descriptor::parse("(IJIJIJJFDFDFDFDFI)V"),
+                                     HostRegisters(std::span<const std::uint64_t>(gp, 6), fp, sysv_stack),
+                                     HostAbi::SysV, 0xe000);
+  CHECK(sysv.integers == std::vector<std::uint64_t>{0xe000, 0x2000, 0xffffffff'80000001, 2, 3, 4, 5, 6});
+  CHECK(sysv.stack ==
+        std::vector<std::uint64_t>{7, std::bit_cast<std::uint32_t>(8.25f), 0xffffffff'fffffffe});
+}
+TEST_CASE("AAPCS64 @CriticalNative decoding skips JNIEnv* and jclass but not their host registers") {
+  std::uint64_t gp[8]{0x1000, 0x2000, 1, 2, 3, 4, 5, 6};
+  std::uint64_t fp[8]{std::bit_cast<std::uint64_t>(0.5)};
+  std::uint64_t stack[3]{7, 8, 9};
+  const auto args = native_arguments(Descriptor::parse("(JJJJJJDJJJ)J"), HostRegisters(gp, fp, stack),
+                                     HostAbi::Aapcs64, 0xe000, true);
+  CHECK(args.integers == std::vector<std::uint64_t>{1, 2, 3, 4, 5, 6, 7, 8});
+  CHECK(args.stack == std::vector<std::uint64_t>{9});
+  REQUIRE(args.doubles.size() == 1);
+  CHECK(args.doubles[0] == 0.5);
+}
 TEST_CASE("JNI mangling round-trips escaped underscores, arrays, Unicode and empty overloads") {
   std::u16string owner = u"com/example/Cl_ass\u03bb";
   std::u16string name = u"foo_bar\U0001F600";

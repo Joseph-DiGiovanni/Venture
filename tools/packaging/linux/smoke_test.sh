@@ -4,28 +4,38 @@
 # and the bundled JRE drawing text headlessly. Also lists, for every ELF in the
 # layout, each library the system has to provide.
 #
-#   tools/packaging/linux/smoke_test.sh [--layout DIR] [--packages DIR] [TEST...]
+#   tools/packaging/linux/smoke_test.sh [--arch x86_64|aarch64] [--layout DIR] [--packages DIR] [TEST...]
 #   TEST: ldd deb rpm aur appimage flatpak (default: all)
+# The containers run the packages' architecture (aarch64: an arm64 host, or
+# QEMU user emulation registered with binfmt_misc).
 set -uo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 root=$(cd "$here/../../.." && pwd)
-layout=$root/dist/Venture-linux64
+arch=x86_64
+layout=
 packages=$root/dist/packages
 tests=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --arch) arch=$2; shift 2 ;;
     --layout) layout=$(realpath "$2"); shift 2 ;;
     --packages) packages=$(realpath "$2"); shift 2 ;;
     *) tests+=("$1"); shift ;;
   esac
 done
+case $arch in
+  x86_64) layout=${layout:-$root/dist/Venture-linux64} platform=linux/amd64 archlinux=docker.io/library/archlinux:latest ;;
+  # Arch Linux publishes no official arm64 image (Arch Linux ARM is a separate project).
+  aarch64) layout=${layout:-$root/dist/Venture-linux-aarch64} platform=linux/arm64 archlinux= ;;
+  *) echo "Unsupported architecture: $arch (x86_64 or aarch64)" >&2; exit 1 ;;
+esac
 [ ${#tests[@]} -gt 0 ] || tests=(ldd deb rpm aur appimage flatpak)
-pkg() { ls "$packages"/Venture-*-linux-x86_64."$1" 2>/dev/null | head -n 1; }
+pkg() { ls "$packages"/Venture-*-linux-"$arch"."$1" 2>/dev/null | head -n 1; }
 probe_dir=$(mktemp -d); trap 'rm -rf "$probe_dir"' EXIT
 failures=0
 result() { echo "== $1: $2"; [ "$2" = PASS ] || failures=$((failures + 1)); }
 box() {  # IMAGE SCRIPT: run SCRIPT in a bare container with the inputs mounted read-only
-  podman run --rm --network=host --security-opt label=disable -v "$layout:/layout:ro" \
+  podman run --rm --platform "$platform" --network=host --security-opt label=disable -v "$layout:/layout:ro" \
     -v "$packages:/packages:ro" -v "$probe_dir:/probe:ro" -v "$here:/packaging:ro" "$1" bash -c "$2"
 }
 
@@ -67,7 +77,7 @@ echo "system libraries used (count of ELF files):"; cat /tmp/system-libs
 for t in "${tests[@]}"; do case $t in
   ldd)
     for image in docker.io/library/ubuntu:22.04 docker.io/library/ubuntu:24.04 docker.io/library/debian:12 \
-                 registry.fedoraproject.org/fedora:41 docker.io/library/archlinux:latest docker.io/opensuse/tumbleweed:latest; do
+                 registry.fedoraproject.org/fedora:41 $archlinux docker.io/opensuse/tumbleweed:latest; do
       echo "--- ldd + start, bare $image"
       if box "$image" "command -v find >/dev/null || zypper -nq in findutils >/dev/null 2>&1
           command -v ldd >/dev/null || zypper -nq in glibc-devel >/dev/null 2>&1
@@ -92,8 +102,9 @@ for t in "${tests[@]}"; do case $t in
       then result "rpm on $image" PASS; else result "rpm on $image" FAIL; fi
     done ;;
   aur)
+    if [ -z "$archlinux" ]; then echo "== AUR on archlinux: skipped (no $arch image)"; continue; fi
     echo "--- AUR venture-bin with makepkg -si on archlinux"
-    if box docker.io/library/archlinux:latest "set -e; pacman -Sqyu --noconfirm --needed base-devel >/dev/null 2>&1
+    if box "$archlinux" "set -e; pacman -Sqyu --noconfirm --needed base-devel >/dev/null 2>&1
         useradd -m build; echo 'build ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/build
         cp -r /packages/aur /home/build/venture-bin; cp /packages/$(basename "$(pkg tar.gz)") /home/build/venture-bin/
         chown -R build /home/build/venture-bin

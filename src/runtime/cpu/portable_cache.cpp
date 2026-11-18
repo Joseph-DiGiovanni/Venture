@@ -1,4 +1,11 @@
 #include "cpu/portable_cache.h"
+#if defined(__aarch64__)
+namespace venture {
+// Cached blocks are x64 machine code with x64 relocations (dynarmic backend/x64/portable_block.h);
+// the arm64 backend can neither capture nor install them, so there is no cache and no instance.
+PortableBlockCache* PortableBlockCache::get() { return nullptr; }
+} // namespace venture
+#else
 #include <dynarmic/backend/x64/portable_block.h>
 #include "common/environment.h"
 #include "common/file_ops.h"
@@ -846,3 +853,4 @@ void PortableBlockCache::flush() noexcept {
   } catch (...) {}
 }
 } // namespace venture
+#endif

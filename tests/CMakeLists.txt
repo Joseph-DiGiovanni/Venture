@@ -97,6 +97,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     target_link_libraries(venture_dbus_portal_tests PRIVATE venture_common doctest::doctest ${VENTURE_SYSTEMD_LIBRARY})
     add_test(NAME dbus_portal_clients COMMAND venture_dbus_portal_tests)
   endif()
+  # D-Bus clients behind qemu-user's SO_PEERGROUPS; the exported getsockopt
+  # interposes the libsystemd they load.
+  add_executable(venture_dbus_peergroups_tests dbus_peergroups_test.cpp)
+  target_include_directories(venture_dbus_peergroups_tests PRIVATE ${PROJECT_SOURCE_DIR}/src)
+  target_link_libraries(venture_dbus_peergroups_tests PRIVATE venture_common doctest::doctest ${CMAKE_DL_LIBS})
+  set_target_properties(venture_dbus_peergroups_tests PROPERTIES ENABLE_EXPORTS ON)
+  add_test(NAME dbus_peergroups_clients COMMAND venture_dbus_peergroups_tests)
   # The runtime's SDL3 audio backend under a private PipeWire.
   add_executable(venture_audio_pipewire_tests audio_pipewire_test.cpp
     ${PROJECT_SOURCE_DIR}/src/runtime/audio/miniaudio_impl.c
@@ -129,7 +136,12 @@ target_sources(venture_tests PRIVATE runtime/loader_lifecycle_test.cpp)
 # Every source partition runs once; supervisor deadlines overlap in isolated roots.
 set(venture_test_partitions venture_tests)
 set(venture_test_split_filters)
-foreach(source core_restart core_thread_failure core_heap_exec jit_cache vulkan vulkan_texture vulkan_fastpath)
+# jit_cache_test.cpp covers x64 backend internals and is built on x64 hosts only.
+set(venture_jit_cache_partition)
+if(VENTURE_JIT_HOST STREQUAL "x64")
+  set(venture_jit_cache_partition jit_cache)
+endif()
+foreach(source core_restart core_thread_failure core_heap_exec ${venture_jit_cache_partition} vulkan vulkan_texture vulkan_fastpath)
   set(filter "*${source}_test.cpp")
   add_test(NAME venture_tests_${source} COMMAND venture_tests "--source-file=${filter}" --duration=true)
   list(APPEND venture_test_partitions venture_tests_${source})
@@ -140,10 +152,12 @@ list(JOIN venture_test_split_filters "," venture_test_split_filter)
 # fixture directory, and two processes sharing it race each other's replaces.
 add_test(NAME venture_tests COMMAND venture_tests "--source-file-exclude=${venture_test_split_filter}" "--test-case-exclude=JIT block list*" --duration=true)
 set_tests_properties(venture_tests_core_restart PROPERTIES COST 1500)
-# The JIT cache partition again with the register allocator's full-slot checks on (environment appended below).
-add_test(NAME venture_tests_jit_cache_alloc_checks COMMAND venture_tests "--source-file=*jit_cache_test.cpp" --duration=true)
-set_tests_properties(venture_tests_jit_cache_alloc_checks PROPERTIES COST 40)
-list(APPEND venture_test_partitions venture_tests_jit_cache_alloc_checks)
+if(VENTURE_JIT_HOST STREQUAL "x64")
+  # The JIT cache partition again with the register allocator's full-slot checks on (environment appended below).
+  add_test(NAME venture_tests_jit_cache_alloc_checks COMMAND venture_tests "--source-file=*jit_cache_test.cpp" --duration=true)
+  set_tests_properties(venture_tests_jit_cache_alloc_checks PROPERTIES COST 40)
+  list(APPEND venture_test_partitions venture_tests_jit_cache_alloc_checks)
+endif()
 add_test(NAME libc_numeric_null_input COMMAND venture_tests
   "--test-case=libc A null integer input delivers a recoverable guest SIGSEGV")
 list(APPEND venture_test_partitions libc_numeric_null_input)
@@ -273,8 +287,8 @@ add_test(NAME venture_data_migration COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CU
 set_tests_properties(venture_data_migration PROPERTIES TIMEOUT 300)
 add_executable(venture_environment_child environment_child.cpp)
 target_link_libraries(venture_environment_child PRIVATE venture_common)
-if(VENTURE_JAVA_HOME)
-  add_test(NAME venture_host_environment COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/host_environment_test.py" "${VENTURE_JAVA_HOME}" "$<TARGET_FILE:venture_environment_child>")
+if(VENTURE_HOST_JAVA_HOME)
+  add_test(NAME venture_host_environment COMMAND "${Python3_EXECUTABLE}" "${CMAKE_CURRENT_SOURCE_DIR}/host_environment_test.py" "${VENTURE_HOST_JAVA_HOME}" "$<TARGET_FILE:venture_environment_child>")
 endif()
 if(TARGET venture_runtime)
 
@@ -306,10 +320,15 @@ if(TARGET dynarmic)
   target_link_libraries(venture_fp_round_tests PRIVATE dynarmic doctest::doctest)
   add_test(NAME fp_round_semantics COMMAND venture_fp_round_tests)
   add_test(NAME dynarmic COMMAND venture_dynarmic_tests)
-  target_sources(venture_tests PRIVATE runtime/jit_memory_test.cpp runtime/jit_cache_test.cpp runtime/jit_block_list_test.cpp)
+  target_sources(venture_tests PRIVATE runtime/jit_block_list_test.cpp)
   add_test(NAME jit_block_list COMMAND venture_tests "--test-case=JIT block list*")
   set_tests_properties(jit_block_list PROPERTIES ENVIRONMENT "VENTURE_JIT_PRETRANSLATE=1")
-  target_link_libraries(venture_tests PRIVATE dynarmic merry::mcl xbyak::xbyak tsl::robin_map)
+  target_link_libraries(venture_tests PRIVATE dynarmic merry::mcl tsl::robin_map)
+  if(VENTURE_JIT_HOST STREQUAL "x64")
+    # x64 backend internals: code buffers, Xbyak-emitted probes and portable x64 blocks.
+    target_sources(venture_tests PRIVATE runtime/jit_memory_test.cpp runtime/jit_cache_test.cpp)
+    target_link_libraries(venture_tests PRIVATE xbyak::xbyak)
+  endif()
 
   if(WIN32)
 
@@ -464,40 +483,43 @@ if(TARGET venture_runtime AND TARGET venture_hle)
     target_link_options(venture_a64_arena_release_tests PRIVATE -pie)
   endif()
   add_test(NAME a64_early_arena_release COMMAND venture_a64_arena_release_tests)
-  add_executable(venture_pretranslate_tests test_main.cpp runtime/pretranslate_test.cpp)
-  target_link_libraries(venture_pretranslate_tests PRIVATE venture_runtime doctest::doctest)
-  if(NOT WIN32)
-    set_property(TARGET venture_pretranslate_tests PROPERTY POSITION_INDEPENDENT_CODE ON)
-    target_link_options(venture_pretranslate_tests PRIVATE -pie)
+  # The portable block cache and background translation hold x64 machine code (x64 hosts only).
+  if(VENTURE_JIT_HOST STREQUAL "x64")
+    add_executable(venture_pretranslate_tests test_main.cpp runtime/pretranslate_test.cpp)
+    target_link_libraries(venture_pretranslate_tests PRIVATE venture_runtime doctest::doctest)
+    if(NOT WIN32)
+      set_property(TARGET venture_pretranslate_tests PROPERTY POSITION_INDEPENDENT_CODE ON)
+      target_link_options(venture_pretranslate_tests PRIVATE -pie)
+    endif()
+    add_test(NAME jit_pretranslate COMMAND ${CMAKE_COMMAND} -E env VENTURE_JIT_PTC_DIR=${CMAKE_CURRENT_BINARY_DIR}/pretranslate-blocks
+             ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/pretranslate-blocks)
+    add_test(NAME jit_pretranslate_run COMMAND ${CMAKE_COMMAND} -E env VENTURE_JIT_PTC_DIR=${CMAKE_CURRENT_BINARY_DIR}/pretranslate-blocks
+             $<TARGET_FILE:venture_pretranslate_tests>)
+    set_tests_properties(jit_pretranslate PROPERTIES FIXTURES_SETUP pretranslate_dir LABELS "cpu;jit")
+    set_tests_properties(jit_pretranslate_run PROPERTIES TIMEOUT 60 FIXTURES_REQUIRED pretranslate_dir LABELS "cpu;jit")
+    # The block cache under concurrent stores, lookups and flushes, from an empty directory.
+    add_executable(venture_portable_cache_tests test_main.cpp runtime/portable_cache_test.cpp)
+    target_link_libraries(venture_portable_cache_tests PRIVATE venture_runtime doctest::doctest)
+    if(NOT WIN32)
+      set_property(TARGET venture_portable_cache_tests PROPERTY POSITION_INDEPENDENT_CODE ON)
+      target_link_options(venture_portable_cache_tests PRIVATE -pie)
+    endif()
+    add_test(NAME jit_portable_cache COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/portable-cache-blocks)
+    add_test(NAME jit_portable_cache_run COMMAND ${CMAKE_COMMAND} -E env VENTURE_JIT_PTC_DIR=${CMAKE_CURRENT_BINARY_DIR}/portable-cache-blocks
+             $<TARGET_FILE:venture_portable_cache_tests>)
+    set_tests_properties(jit_portable_cache PROPERTIES FIXTURES_SETUP portable_cache_dir LABELS "cpu;jit")
+    set_tests_properties(jit_portable_cache_run PROPERTIES TIMEOUT 120 FIXTURES_REQUIRED portable_cache_dir LABELS "cpu;jit")
+    # Explored marks across three runs (processes) on one cache directory, in order.
+    add_test(NAME jit_portable_cache_marks COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/portable-cache-marks)
+    set_tests_properties(jit_portable_cache_marks PROPERTIES FIXTURES_SETUP portable_cache_marks_dir LABELS "cpu;jit")
+    set(previous jit_portable_cache_marks)
+    foreach(step 1 2 3)
+      add_test(NAME jit_portable_cache_marks_${step} COMMAND ${CMAKE_COMMAND} -E env VENTURE_JIT_PTC_DIR=${CMAKE_CURRENT_BINARY_DIR}/portable-cache-marks
+               $<TARGET_FILE:venture_portable_cache_tests> "--test-case=explored marks ${step}:*" --no-skip=true)
+      set_tests_properties(jit_portable_cache_marks_${step} PROPERTIES TIMEOUT 60 FIXTURES_REQUIRED portable_cache_marks_dir DEPENDS ${previous} LABELS "cpu;jit")
+      set(previous jit_portable_cache_marks_${step})
+    endforeach()
   endif()
-  add_test(NAME jit_pretranslate COMMAND ${CMAKE_COMMAND} -E env VENTURE_JIT_PTC_DIR=${CMAKE_CURRENT_BINARY_DIR}/pretranslate-blocks
-           ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/pretranslate-blocks)
-  add_test(NAME jit_pretranslate_run COMMAND ${CMAKE_COMMAND} -E env VENTURE_JIT_PTC_DIR=${CMAKE_CURRENT_BINARY_DIR}/pretranslate-blocks
-           $<TARGET_FILE:venture_pretranslate_tests>)
-  set_tests_properties(jit_pretranslate PROPERTIES FIXTURES_SETUP pretranslate_dir LABELS "cpu;jit")
-  set_tests_properties(jit_pretranslate_run PROPERTIES TIMEOUT 60 FIXTURES_REQUIRED pretranslate_dir LABELS "cpu;jit")
-  # The block cache under concurrent stores, lookups and flushes, from an empty directory.
-  add_executable(venture_portable_cache_tests test_main.cpp runtime/portable_cache_test.cpp)
-  target_link_libraries(venture_portable_cache_tests PRIVATE venture_runtime doctest::doctest)
-  if(NOT WIN32)
-    set_property(TARGET venture_portable_cache_tests PROPERTY POSITION_INDEPENDENT_CODE ON)
-    target_link_options(venture_portable_cache_tests PRIVATE -pie)
-  endif()
-  add_test(NAME jit_portable_cache COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/portable-cache-blocks)
-  add_test(NAME jit_portable_cache_run COMMAND ${CMAKE_COMMAND} -E env VENTURE_JIT_PTC_DIR=${CMAKE_CURRENT_BINARY_DIR}/portable-cache-blocks
-           $<TARGET_FILE:venture_portable_cache_tests>)
-  set_tests_properties(jit_portable_cache PROPERTIES FIXTURES_SETUP portable_cache_dir LABELS "cpu;jit")
-  set_tests_properties(jit_portable_cache_run PROPERTIES TIMEOUT 120 FIXTURES_REQUIRED portable_cache_dir LABELS "cpu;jit")
-  # Explored marks across three runs (processes) on one cache directory, in order.
-  add_test(NAME jit_portable_cache_marks COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_CURRENT_BINARY_DIR}/portable-cache-marks)
-  set_tests_properties(jit_portable_cache_marks PROPERTIES FIXTURES_SETUP portable_cache_marks_dir LABELS "cpu;jit")
-  set(previous jit_portable_cache_marks)
-  foreach(step 1 2 3)
-    add_test(NAME jit_portable_cache_marks_${step} COMMAND ${CMAKE_COMMAND} -E env VENTURE_JIT_PTC_DIR=${CMAKE_CURRENT_BINARY_DIR}/portable-cache-marks
-             $<TARGET_FILE:venture_portable_cache_tests> "--test-case=explored marks ${step}:*" --no-skip=true)
-    set_tests_properties(jit_portable_cache_marks_${step} PROPERTIES TIMEOUT 60 FIXTURES_REQUIRED portable_cache_marks_dir DEPENDS ${previous} LABELS "cpu;jit")
-    set(previous jit_portable_cache_marks_${step})
-  endforeach()
 endif()
 
 if(TARGET venture_runtime)
@@ -717,7 +739,7 @@ endif()
 if(TARGET venture_java)
   set(media_java_classes "${CMAKE_CURRENT_BINARY_DIR}/media-java-classes")
   add_custom_command(OUTPUT "${media_java_classes}/MediaFlow.class"
-    COMMAND "${VENTURE_JAVA_HOME}/bin/javac" -encoding UTF-8 --release 21 -cp "${VENTURE_FRAMEWORK_JAR}"
+    COMMAND "${VENTURE_HOST_JAVA_HOME}/bin/javac" -encoding UTF-8 --release 21 -cp "${VENTURE_FRAMEWORK_JAR}"
       -d "${media_java_classes}" "${CMAKE_CURRENT_SOURCE_DIR}/java/MediaFlow.java"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/java/MediaFlow.java" venture-framework VERBATIM)
   add_custom_target(venture_media_java_fixture DEPENDS "${media_java_classes}/MediaFlow.class")
@@ -743,7 +765,7 @@ if(TARGET venture_java)
     VENTURE_TEST_JVM_AGENT="$<TARGET_FILE:venture_jvmti_agent>"
     VENTURE_TEST_JAVA_CLASSES="${CMAKE_CURRENT_BINARY_DIR}/java-classes")
   add_custom_command(OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/java-classes/BridgeFixture.class"
-    COMMAND "${VENTURE_JAVA_HOME}/bin/javac" -encoding UTF-8 -d "${CMAKE_CURRENT_BINARY_DIR}/java-classes"
+    COMMAND "${VENTURE_HOST_JAVA_HOME}/bin/javac" -encoding UTF-8 -d "${CMAKE_CURRENT_BINARY_DIR}/java-classes"
       "${CMAKE_CURRENT_SOURCE_DIR}/runtime/java_fixture/BridgeFixture.java"
       "${CMAKE_CURRENT_SOURCE_DIR}/runtime/java_fixture/ExportFixture.java"
       "${CMAKE_CURRENT_SOURCE_DIR}/runtime/java_fixture/DependencyFixture.java"
@@ -1030,21 +1052,23 @@ foreach(test IN LISTS venture_test_partitions)
     "VENTURE_DATA_DIR=${root}/data" "LOCALAPPDATA=${root}/local"
     "TEMP=${temp}" "TMP=${temp}" "TMPDIR=${temp}")
 endforeach()
-set_property(TEST venture_tests_jit_cache_alloc_checks APPEND PROPERTY ENVIRONMENT "VENTURE_JIT_CHECK_ALLOC_SCOPE=1")
+if(VENTURE_JIT_HOST STREQUAL "x64")
+  set_property(TEST venture_tests_jit_cache_alloc_checks APPEND PROPERTY ENVIRONMENT "VENTURE_JIT_CHECK_ALLOC_SCOPE=1")
+endif()
 
 # Public Android API 32 constants: pure JVM reflection, no game or OpenXR calls.
 if(TARGET venture-framework)
   set(manifest_api_classes "${CMAKE_CURRENT_BINARY_DIR}/manifest-api-classes")
   add_custom_command(OUTPUT "${manifest_api_classes}/ManifestApiFixture.class"
     COMMAND "${CMAKE_COMMAND}" -E make_directory "${manifest_api_classes}"
-    COMMAND "${VENTURE_JAVA_HOME}/bin/javac" -encoding UTF-8 -d "${manifest_api_classes}"
+    COMMAND "${VENTURE_HOST_JAVA_HOME}/bin/javac" -encoding UTF-8 -d "${manifest_api_classes}"
       "${CMAKE_CURRENT_SOURCE_DIR}/java/ManifestApiFixture.java"
     DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/java/ManifestApiFixture.java"
     VERBATIM)
   add_custom_target(venture_manifest_api_fixture ALL DEPENDS "${manifest_api_classes}/ManifestApiFixture.class")
   add_dependencies(venture_manifest_api_fixture venture-framework)
   add_test(NAME framework_manifest_api COMMAND "${Python3_EXECUTABLE}"
-    "${CMAKE_CURRENT_SOURCE_DIR}/framework_manifest_api_test.py" "${VENTURE_JAVA_HOME}"
+    "${CMAKE_CURRENT_SOURCE_DIR}/framework_manifest_api_test.py" "${VENTURE_HOST_JAVA_HOME}"
     "${manifest_api_classes}" "${VENTURE_FRAMEWORK_JAR}"
     "${CMAKE_CURRENT_SOURCE_DIR}/java/android32-manifest-api.txt")
   set_tests_properties(framework_manifest_api PROPERTIES TIMEOUT 35)

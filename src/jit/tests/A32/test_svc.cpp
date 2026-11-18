@@ -7,7 +7,9 @@
  */
 
 #include <optional>
-#include <xmmintrin.h>
+#if defined(__x86_64__)
+#    include <xmmintrin.h>
+#endif
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -15,6 +17,27 @@
 #include "tests/native/testenv.h"
 
 using namespace Dynarmic;
+
+namespace {
+// The host's sticky floating-point status register and two of its flags.
+#if defined(__x86_64__)
+u32 HostFpStatus() { return _mm_getcsr(); }
+void SetHostFpStatus(u32 value) { _mm_setcsr(value); }
+constexpr u32 host_divide_by_zero = 0x04, host_inexact = 0x20;
+// MXCSR flags a callback raises stay in MXCSR after Run returns.
+constexpr u32 host_flags_after_run = host_divide_by_zero | host_inexact;
+#elif defined(__aarch64__)
+u32 HostFpStatus() {
+    u64 value;
+    asm volatile("mrs %0, fpsr" : "=r"(value));
+    return static_cast<u32>(value);
+}
+void SetHostFpStatus(u32 value) { asm volatile("msr fpsr, %0" : : "r"(u64{value})); }
+constexpr u32 host_divide_by_zero = 0x02, host_inexact = 0x10;
+// Run restores the host FPSR it entered with; callbacks start from a zero FPSR.
+constexpr u32 host_flags_after_run = host_inexact;
+#endif
+}  // namespace
 
 class ArmSvcTestEnv : public ArmTestEnv {
 public:
@@ -51,7 +74,7 @@ TEST_CASE("arm/thumb: optional frame chain preserves interworking and conditiona
             ArmSvcTestEnv::CallSVC(swi);
             // Host callback arithmetic may set sticky flags. They must not
             // enter the guest FPSCR when the JIT resumes or halts.
-            _mm_setcsr(_mm_getcsr() | 0x04); // masked host divide-by-zero status
+            SetHostFpStatus(HostFpStatus() | host_divide_by_zero); // masked host divide-by-zero status
             jit->HaltExecution(HaltReason::UserDefined1);
         }
     };
@@ -87,12 +110,12 @@ TEST_CASE("arm/thumb: optional frame chain preserves interworking and conditiona
                 jit.Regs()[0] = 41;
                 jit.Regs()[2] = 0x100;
                 jit.SetCpsr(0x10);
-                const auto host_mxcsr = _mm_getcsr();
-                _mm_setcsr(host_mxcsr | 0x20); // independent host inexact status
+                const auto host_status = HostFpStatus();
+                SetHostFpStatus(host_status | host_inexact); // independent host inexact status
                 CheckedRun([&] { jit.Run(); });
-                const auto returned_mxcsr = _mm_getcsr();
-                _mm_setcsr(host_mxcsr);
-                CHECK((returned_mxcsr & 0x24) == 0x24);
+                const auto returned_status = HostFpStatus();
+                SetHostFpStatus(host_status);
+                CHECK((returned_status & (host_divide_by_zero | host_inexact)) == host_flags_after_run);
                 CHECK(env.svc_called == 0x1ee);
                 CHECK(jit.Regs()[0] == 42);
                 CHECK(jit.Regs()[1] == 7);

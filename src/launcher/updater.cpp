@@ -39,15 +39,19 @@ std::string lower(std::string text) {
   std::ranges::transform(text, text.begin(), [](unsigned char c) { return char(std::tolower(c)); });
   return text;
 }
+// The AppImage built for this machine's architecture.
+#if defined(__aarch64__)
+constexpr std::string_view kAppImage = "-linux-aarch64.AppImage";
+#else
+constexpr std::string_view kAppImage = "-linux-x86_64.AppImage";
+#endif
 }  // namespace
 std::optional<Asset> pick(const Json &release, Method method) {
   switch (method) {
     case Method::installer:
       return find(release, [](std::string_view n) { return n == "Venture-windows64-setup.exe"; });
     case Method::appimage:
-      return find(release, [](std::string_view n) {
-        return n.starts_with("Venture-") && n.ends_with("-linux-x86_64.AppImage");
-      });
+      return find(release, [](std::string_view n) { return n.starts_with("Venture-") && n.ends_with(kAppImage); });
     case Method::page:
       break;
   }

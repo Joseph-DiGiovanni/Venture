@@ -30,8 +30,13 @@ protected:
     void EmitPrelude();
     EmitConfig GetEmitConfig() override;
     void RegisterNewBasicBlock(const IR::Block& block, const EmittedBlockInfo& block_info) override;
+    std::pair<u64, bool> DescribeLocation(IR::LocationDescriptor descriptor) const override;
+    void EmitLoadGuestFpcr(oaknut::WReg dest) override;
+    std::size_t GuestFpsrOffset() const override;
 
     const A64::UserConfig conf;
+    // Guest code [begin, end) of outlined atomic helpers translated into the block being compiled.
+    mutable std::vector<std::pair<u64, u64>> inlined_code;
     BlockRangeInformation<u64> block_ranges;
 };
 

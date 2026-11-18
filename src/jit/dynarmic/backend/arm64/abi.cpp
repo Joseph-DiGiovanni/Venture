@@ -91,4 +91,9 @@ void ABI_PopRegisters(oaknut::CodeGenerator& code, RegisterList rl, std::size_t 
     code.ADD(SP, SP, frame_info.gprs_size + frame_info.fprs_size);
 }
 
+std::size_t ABI_PushedSize(RegisterList rl) {
+    const FrameInfo frame_info = CalculateFrameInfo(rl, 0);
+    return frame_info.gprs_size + frame_info.fprs_size;
+}
+
 }  // namespace Dynarmic::Backend::Arm64

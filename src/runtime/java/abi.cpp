@@ -270,21 +270,14 @@ std::string to_modified_utf8(std::u16string_view s) {
   }
   return out;
 }
-NativeArguments native_arguments(const Descriptor& d, const HostArguments& host, HostAbi abi, GuestAddr env,
+NativeArguments native_arguments(const Descriptor& d, const HostRegisters& host, HostAbi abi, GuestAddr env,
                                  bool critical) {
   NativeArguments out;
   // The host JVM always passes JNIEnv* and jclass; the guest sees them unless critical.
   if (!critical) out.integers = {env, host.gp[1]};
-  unsigned gp = 2, simd = 0, position = 2, stack = 0;
+  HostSlots slots(abi);
   for (Type t : d.parameters) {
-    std::uint64_t value;
-    if (abi == HostAbi::Win64) {
-      value = position < 4 ? (fp(t) ? host.fp[position] : host.gp[position]) : host.stack[position - 4];
-      ++position;
-    } else if (fp(t))
-      value = simd < 8 ? host.fp[simd++] : host.stack[stack++];
-    else
-      value = gp < 6 ? host.gp[gp++] : host.stack[stack++];
+    std::uint64_t value = host_value(host, slots.next(t));
     value = narrow(t, value);
     if (fp(t) && out.doubles.size() < 8)
       out.doubles.push_back(std::bit_cast<double>(value));

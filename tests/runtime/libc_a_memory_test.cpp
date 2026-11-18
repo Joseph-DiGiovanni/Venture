@@ -1,5 +1,6 @@
 #include <doctest/doctest.h>
 
+#include <array>
 #include <algorithm>
 #include <cstring>
 #include <string_view>
@@ -9,6 +10,7 @@
 #include "core/error.h"
 #include "hle/libc/libc_a.h"
 #include "libc_a_test_support.h"
+#include "platform/memory.h"
 using namespace venture;
 
 // North Star (Unity 2022, Linux): Unity's allocator fell back to libc free with
@@ -73,4 +75,46 @@ TEST_CASE("libc A free leaves a small block's bytes intact through later allocat
     REQUIRE(p);
     f.invoke("free", {p});
   }
+}
+// The fault-contained copies behind HLE memcpy/memset/memcmp: a guest fault
+// returns false with the faulting address and access kind instead of killing
+// the process.
+TEST_CASE("native memory routines contain guest faults and report the access") {
+  auto& space = AddressSpace::get();
+  const auto p = space.allocate(3 * kGuestPageSize, kProtRead | kProtWrite, "[native memory faults]");
+  REQUIRE(p);
+  const auto read_only = p + kGuestPageSize, none = p + 2 * kGuestPageSize;
+  std::memset(g2h(p), 'a', 2 * kGuestPageSize);
+  REQUIRE(space.protect(read_only, kGuestPageSize, kProtRead) == 0);
+  REQUIRE(space.protect(none, kGuestPageSize, kProtNone) == 0);
+  platform::NativeMemoryFault fault;
+  CHECK(platform::native_copy(p + 64, read_only, 64, fault));
+  CHECK_FALSE(platform::native_copy(read_only, p, 64, fault));
+  CHECK(fault.address - read_only < 64);
+  CHECK(fault.write);
+  CHECK_FALSE(fault.bus);
+  fault = {};
+  CHECK_FALSE(platform::native_copy(p, none, 64, fault));
+  CHECK(fault.address - none < 64);
+  CHECK_FALSE(fault.write);
+  fault = {};
+  CHECK_FALSE(platform::native_fill(read_only - 32, 'b', 64, fault));
+  CHECK(fault.address - (read_only - 32) < 64);
+  CHECK(fault.write);
+  CHECK(*g2h<char>(read_only) == 'a');
+  int order = 0;
+  CHECK(platform::native_compare(p, read_only, 16, order, fault));
+  CHECK(order == 0);
+  fault = {};
+  CHECK_FALSE(platform::native_compare(p, none, 16, order, fault));
+  CHECK(fault.address - none < 16);
+  CHECK_FALSE(fault.write);
+  // Reads of every width, including the single-load sizes, stop at the page.
+  std::array<char, 24> out{};
+  for (const std::size_t size : {1u, 2u, 4u, 8u, 12u, 24u}) {
+    INFO(size);
+    CHECK(platform::read_memory(none - size, out.data(), size));
+    CHECK_FALSE(platform::read_memory(none - size + 1, out.data(), size));
+  }
+  space.free(p);
 }

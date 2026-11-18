@@ -125,4 +125,49 @@ void EmitIR<IR::Opcode::A64ExclusiveWriteMemory128>(oaknut::CodeGenerator& code,
     EmitExclusiveWriteMemory<128>(code, ctx, inst);
 }
 
+template<>
+void EmitIR<IR::Opcode::A64AtomicMemory8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitAtomicMemory<8>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64AtomicMemory16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitAtomicMemory<16>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64AtomicMemory32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitAtomicMemory<32>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64AtomicMemory64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitAtomicMemory<64>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64CompareAndSwapMemory8>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareAndSwapMemory<8>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64CompareAndSwapMemory16>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareAndSwapMemory<16>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64CompareAndSwapMemory32>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareAndSwapMemory<32>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64CompareAndSwapMemory64>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareAndSwapMemory<64>(code, ctx, inst);
+}
+
+template<>
+void EmitIR<IR::Opcode::A64CompareAndSwapMemory128>(oaknut::CodeGenerator& code, EmitContext& ctx, IR::Inst* inst) {
+    EmitCompareAndSwapMemory<128>(code, ctx, inst);
+}
+
 }  // namespace Dynarmic::Backend::Arm64

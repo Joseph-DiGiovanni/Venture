@@ -37,7 +37,7 @@ class NativeScope {
   jobject pop(jobject result);
 };
 bool special(JNIEnv*, hle::CallContext&);
-hle::a32::CallBuilder32 native_arguments(const Descriptor&, const HostArguments&, HostAbi, GuestAddr,
+hle::a32::CallBuilder32 native_arguments(const Descriptor&, const HostRegisters&, HostAbi, GuestAddr,
                                          bool critical = false);
 
 template <class T>

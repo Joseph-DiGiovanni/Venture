@@ -7,7 +7,8 @@ namespace venture::dbus {
 // D-Bus through libsystemd's sd-bus, loaded at run time. One connection per
 // bus serves the process; it is reopened after a failure, so a restarted bus
 // or service is picked up. Every call fails (nullopt/false) without
-// libsystemd or a reachable bus.
+// libsystemd or a reachable bus, and where sd-bus could not connect without
+// spinning (getsockopt(SO_PEERGROUPS) under qemu-user).
 enum class Bus { system, session };
 std::optional<std::uint32_t> u32_property(Bus bus, const char* destination, const char* path, const char* interface,
                                           const char* member);

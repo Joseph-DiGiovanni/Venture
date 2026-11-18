@@ -12,7 +12,11 @@
 #include "platform/low_memory.h"
 #include "platform/memory.h"
 #include <dynarmic/interface/A32/a32.h>
+#if defined(__aarch64__)
+#include <dynarmic/backend/arm64/a32_jitstate.h>
+#else
 #include <dynarmic/backend/x64/a32_jitstate.h>
+#endif
 #include <dynarmic/interface/A32/coprocessor.h>
 #include <dynarmic/interface/exclusive_monitor.h>
 #include <dynarmic/interface/profiling.h>
@@ -37,6 +41,14 @@ namespace {
 using Dynarmic::HaltReason;
 using Dynarmic::A32::VAddr;
 using Dynarmic::A32::CoprocReg;
+// The host backend's jitstate passed to CallSVCFastKnown, and its guest register array.
+#if defined(__aarch64__)
+using JitState = Dynarmic::Backend::Arm64::A32JitState;
+std::uint32_t* jit_state_regs(JitState& state) { return state.regs.data(); }
+#else
+using JitState = Dynarmic::Backend::X64::A32JitState;
+std::uint32_t* jit_state_regs(JitState& state) { return state.Reg.data(); }
+#endif
 class A32Cpu;
 class A32Backend final : public CpuBackend {
  public:
@@ -65,10 +77,12 @@ class A32Cpu final : public Cpu, private Dynarmic::A32::UserCallbacks {
     if (profile::enabled) Dynarmic::SetCodeRegistrationCallback(profile::register_translation);
     if (profile::compile_timing_enabled) Dynarmic::SetCompileTimingCallback(JitBlockList::compilation);
     Dynarmic::A32::UserConfig config{};
+#if !defined(__aarch64__)
     // Diagnostics: VENTURE_JIT_DISABLED_HOST_FEATURES=<mask> hides host ISA extensions
     // (dynarmic HostFeature bits, e.g. 0xfe0 for every AVX-512 subset) from the emitter.
     if (const auto* mask = environment::getenv("VENTURE_JIT_DISABLED_HOST_FEATURES"))
       config.disabled_host_features = static_cast<std::uint32_t>(std::strtoul(mask, nullptr, 0));
+#endif
     config.callbacks = this;
     config.code_allocation_failed = alloc_failure::jit_code_refused;
     config.processor_id = slot;
@@ -146,9 +160,14 @@ class A32Cpu final : public Cpu, private Dynarmic::A32::UserCallbacks {
     if (!thunk_metadata || std::string_view(thunk_metadata) != "0")
       config.svc_lookup = [](VAddr entry, std::uint32_t svc) { return hle::resolve_thunk(entry, svc); };
     config.wall_clock_cntpct = true;
+#if defined(__aarch64__)
+    // arm64 blocks branch to the prelude trampolines, which B/BL reach within 128 MiB.
+    config.code_cache_size = 128 * 1024 * 1024;
+#else
     // As on A64, retain load-time translations beyond 128 MiB. This bounded
     // reservation commits pages only as code is emitted, including on cold threads.
     config.code_cache_size = 256 * 1024 * 1024;
+#endif
     for (unsigned i = 0; i < 16; ++i) config.coprocessors[i] = std::make_shared<Coprocessor>(*this, i);
     jit_ = std::make_unique<Dynarmic::A32::Jit>(config);
     jit_->SetCpsr(0x10); // User mode, ARM, little endian.
@@ -367,9 +386,9 @@ class A32Cpu final : public Cpu, private Dynarmic::A32::UserCallbacks {
   }
   void CallSVCFastKnown(std::uint32_t immediate, const void* metadata, void* state) override {
     svc_ = immediate & 0x00ffffff;
-    auto& registers = *static_cast<Dynarmic::Backend::X64::A32JitState*>(state);
+    auto& registers = *static_cast<JitState*>(state);
     if (dispatch_hle_in_jit(*static_cast<const hle::FunctionInfo*>(metadata),
-                           hle::Registers(registers.Reg.data()))) return;
+                           hle::Registers(jit_state_regs(registers)))) return;
     exit_ = has_hle_exception() ? CpuExit::HleException : CpuExit::Svc;
     jit_->HaltExecution();
   }

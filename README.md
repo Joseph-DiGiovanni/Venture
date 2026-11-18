@@ -34,6 +34,7 @@ No virtual machine. Free and open source.
 
 1. Download `Venture-windows64-setup.exe` from [Releases](https://github.com/Villagers654/Venture/releases/latest) and run it.
    On Linux, install the package for your distribution (`.deb`, `.rpm`, AUR `venture-bin`, AppImage or Flatpak), or extract the `.tar.gz` anywhere.
+   On an arm64 Linux machine such as the Steam Frame (SteamOS), pick the files named `linux-aarch64`; the others are `linux-x86_64`.
 2. Start Venture and choose Sign in with Meta and use the account that owns your Quest games.
    If Meta's sign-in window doesn't open, or you'd rather use your own browser, choose **Sign in manually** under it.
 3. Pick a game in your library and choose **Install**.
@@ -84,6 +85,20 @@ python3 tools/bootstrap.py --jdk             # pinned CMake, Ninja and JDK into 
 .deps/cmake/bin/cmake --preset linux-release
 .deps/cmake/bin/cmake --build --preset linux-release
 ```
+
+### Build (Linux aarch64, Steam Frame)
+
+Cross-built on a Linux x64 machine with clang, lld and llvm 21 or newer, `wayland-scanner`, `gpgv` (verifies the sysroot's packages) and `qemu-user-static` (QEMU runs the build's own arm64 tools):
+
+```sh
+python3 tools/bootstrap.py --jdk --target aarch64   # also the arm64 sysroot, JDK and FFmpeg
+python3 tools/angle/build_angle.py --target-cpu arm64
+.deps/cmake/bin/cmake --preset linux-aarch64
+.deps/cmake/bin/cmake --build --preset linux-aarch64 --target package-release   # dist/Venture-linux-aarch64
+tools/packaging/linux/build_packages.sh --arch aarch64                          # optional: .deb, .rpm, AppImage, ...
+```
+
+On an arm64 machine the `linux-release` steps above build natively. ANGLE builds only on x64, so build it there with `tools/angle/build_angle.py --target-cpu arm64` and copy `.deps/angle/<pin>-arm64` over.
 
 ## License
 

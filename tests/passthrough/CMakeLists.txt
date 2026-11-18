@@ -60,7 +60,8 @@ add_test(NAME passthrough_production_lifecycle COMMAND venture_passthrough_lifec
 
 # The ordinary VR colour shaders stay byte-identical to the retained upstream copy.
 add_test(NAME passthrough_ordinary_shader_unchanged COMMAND "${Python3_EXECUTABLE}"
-  "${CMAKE_CURRENT_SOURCE_DIR}/shader_variant_test.py" "$<TARGET_FILE:glslang-standalone>" "${passthrough_color_generated}")
+  "${CMAKE_CURRENT_SOURCE_DIR}/shader_variant_test.py" ${CMAKE_CROSSCOMPILING_EMULATOR}
+  "$<TARGET_FILE:glslang-standalone>" "${passthrough_color_generated}")
 
 # The production host initializer's extension requests; one process each, as
 # host_xr() keeps a process-lifetime instance.

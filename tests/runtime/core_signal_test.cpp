@@ -550,13 +550,43 @@ TEST_CASE("A64 qsort and qsort_r sort in place with the guest comparator") {
       }
   Linker::get().close(libc);
 }
-#if defined(__x86_64__) || defined(_M_X64)
-TEST_CASE("A64 libm in the JIT keeps the guest MXCSR: guest rounding, FPSR flags and errno") {
+#if defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__)
+namespace {
+#if defined(__aarch64__)
+// The host FPCR and FPSR, which hold the guest's own bits.
+struct HostFp {
+  std::uint64_t fpcr, fpsr;
+  bool operator==(const HostFp&) const = default;
+};
+HostFp host_fp() {
+  HostFp v;
+  asm volatile("mrs %0, fpcr" : "=r"(v.fpcr));
+  asm volatile("mrs %0, fpsr" : "=r"(v.fpsr));
+  return v;
+}
+void set_host_fp(HostFp v) {
+  asm volatile("msr fpcr, %0" :: "r"(v.fpcr) : "memory");
+  asm volatile("msr fpsr, %0" :: "r"(v.fpsr) : "memory");
+}
+HostFp clean_host_fp(unsigned mode) { return {std::uint64_t(mode) << 22, 0}; }
+unsigned guest_flags(HostFp v) { return v.fpsr & 0x9f; }
+#else
+using HostFp = unsigned;
+HostFp host_fp() { return _mm_getcsr(); }
+void set_host_fp(HostFp v) { _mm_setcsr(v); }
+HostFp clean_host_fp(unsigned mode) {
+  constexpr unsigned rounding[] = {0, 2u << 13, 1u << 13, 3u << 13};
+  return 0x1f80u | rounding[mode];
+}
+unsigned guest_flags(HostFp csr) { return (csr & 1) | ((csr >> 1) & 0x1e); }
+#endif
+}  // namespace
+TEST_CASE("A64 libm in the JIT keeps the guest FP environment: guest rounding, FPSR flags and errno") {
   register_all_hle_libraries();
   GuestThread thread(81); thread.attach_to_current_host_thread();
   auto* libm = Linker::get().open("libm.so", kRtldNow, nullptr);
   REQUIRE(libm);
-  // Pure math binds to the guest-MXCSR fast call; scalbln keeps the host
+  // Pure math binds to the guest-FP fast call; scalbln keeps the host
   // environment (ldexp and scalbn are guest routines).
   CHECK(hle::resolve_thunk(Linker::get().symbol(libm, "atanf"), kSvcHleCallFastGuestFp));
   CHECK(hle::resolve_thunk(Linker::get().symbol(libm, "scalbln"), kSvcHleCallFastFp));
@@ -567,17 +597,15 @@ TEST_CASE("A64 libm in the JIT keeps the guest MXCSR: guest rounding, FPSR flags
     const std::uint64_t target[] = {Linker::get().symbol(libm, name)};
     return thread.call(probe, GuestCallArgs{target, {}});
   };
-  const auto host_csr = _mm_getcsr();
-  constexpr unsigned rounding[] = {0, 2u << 13, 1u << 13, 3u << 13};
-  const auto guest_flags = [](unsigned csr) { return (csr & 1) | ((csr >> 1) & 0x1e); };
-  // The reference runs the same host routine in a clean MXCSR with the guest rounding mode.
+  const auto host = host_fp();
+  // The reference runs the same host routine in a clean environment with the guest rounding mode.
   const auto check = [&](const char* name, unsigned mode, auto x, auto reference) {
     using T = decltype(x);
     using Bits = std::conditional_t<sizeof(T) == 4, std::uint32_t, std::uint64_t>;
-    _mm_setcsr(0x1f80u | rounding[mode]);
+    set_host_fp(clean_host_fp(mode));
     const T expected = reference(x);
-    const auto flags = guest_flags(_mm_getcsr());
-    _mm_setcsr(host_csr);
+    const auto flags = guest_flags(host_fp());
+    set_host_fp(host);
     thread.cpu().set_fpcr(mode << 22);
     thread.cpu().set_fpsr(0);
     thread.cpu().set_v(0, {std::bit_cast<Bits>(x), 0});
@@ -586,7 +614,7 @@ TEST_CASE("A64 libm in the JIT keeps the guest MXCSR: guest rounding, FPSR flags
     CHECK(Bits(r.v0.lo) == std::bit_cast<Bits>(expected));
     CHECK(r.x0 == flags);
     CHECK_FALSE(hle::guest_fp_environment);
-    CHECK(_mm_getcsr() == host_csr);
+    CHECK(host_fp() == host);
   };
   for (unsigned mode = 0; mode < 4; ++mode) {
     check("sqrt", mode, 2.0, [](double v) { double (*volatile f)(double) = &std::sqrt; return f(v); });
@@ -610,7 +638,7 @@ TEST_CASE("A64 libm in the JIT keeps the guest MXCSR: guest rounding, FPSR flags
   const auto quieted = run("floorf");
   CHECK(std::uint32_t(quieted.v0.lo) == 0x7fc00001u);
   CHECK(quieted.x0 == 1);
-  CHECK(_mm_getcsr() == host_csr);
+  CHECK(host_fp() == host);
   Linker::get().close(libm);
 }
 #endif
