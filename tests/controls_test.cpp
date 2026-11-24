@@ -692,9 +692,9 @@ TEST_CASE("Controls read a SteamVR binding file made for Venture") {
   CHECK(unknown.config.at(std::string(kTouch)).rows[1][int(Quest::primary)] == Inputs{"/input/b/click"});
 }
 
-TEST_CASE("Controls tuning: sticks, press points, vibration and toggles are saved, limited and read back") {
+TEST_CASE("Controls tuning: sticks, press points, pointing, vibration and toggles are saved, limited and read back") {
   Choice c;
-  c.tuning[0] = {20, true, false, 30, 0, true, 60};
+  c.tuning[0] = {20, true, false, 30, 0, true, 60, 25};
   c.tuning[1] = {0, false, true, 0, 70, false, 100};
   c.toggles[int(Quest::primary)] = c.toggles[int(Quest::trigger)] = true;
   Config config{{std::string(kIndex), c}};
@@ -703,11 +703,13 @@ TEST_CASE("Controls tuning: sticks, press points, vibration and toggles are save
   CHECK(back.at(std::string(kIndex)) == c);
   // Defaults write nothing; out-of-range values are limited; unknown toggles are ignored.
   CHECK(encode({{std::string(kIndex), Choice{}}}).find("tuning") == std::string::npos);
-  const auto odd = decode(R"({"/interaction_profiles/valve/index_controller":{"tuning":{"left":{"deadzone":99,"triggerPress":2,"strength":300}},"toggles":["menu","grip","secondary"]}})");
+  const auto odd = decode(R"({"/interaction_profiles/valve/index_controller":{"tuning":{"left":{"deadzone":99,"triggerPress":2,"strength":300,"pointing":2},"right":{"pointing":99}},"toggles":["menu","grip","secondary"]}})");
   const auto& o = odd.at(std::string(kIndex));
   CHECK(o.tuning[0].deadzone == kMaxDeadzone);
   CHECK(o.tuning[0].trigger_press == kMinPress);
   CHECK(o.tuning[0].strength == 100);
+  CHECK(o.tuning[0].pointing == kMinPointing);
+  CHECK(o.tuning[1].pointing == kMaxPointing);
   CHECK_FALSE(o.toggles[int(Quest::menu)]);
   CHECK_FALSE(o.toggles[int(Quest::grip)]);  // the grip's toggle is grip_toggle
   CHECK(o.toggles[int(Quest::secondary)]);

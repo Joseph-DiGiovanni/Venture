@@ -808,7 +808,7 @@ void near_proximity() {
          [&] {
            return on(trigger_touch) || on(index_near) ||
                   (in[trigger].active && in[trigger].value >= venture::controls::kNearTrigger) ||
-                  venture::xr::held_index_near(L.session, hand).value_or(false);
+                  venture::xr::held_index_near(L.session, hand, r->tuning[std::size_t(hand)].pointing).value_or(false);
          });
     near(Quest::thumb_proximity, {pro_thumb_proximity, plus_thumb_proximity},
          {stick, stick_click, stick_touch, primary, primary_touch, secondary, secondary_touch, thumbrest_touch,

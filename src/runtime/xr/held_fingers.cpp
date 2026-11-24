@@ -65,7 +65,7 @@ std::optional<float> index_bend(const XrHandJointLocationEXT* joints) {
   const float cosine = (first.x * last.x + first.y * last.y + first.z * last.z) / lengths;
   return std::acos(std::clamp(cosine, -1.f, 1.f)) * 57.29578f;
 }
-std::optional<bool> held_index_near(XrSession session, int hand) {
+std::optional<bool> held_index_near(XrSession session, int hand, int pointing) {
   auto& h = held();
   std::lock_guard lock(held_mutex);
   if (h.session != session) {
@@ -86,7 +86,7 @@ std::optional<bool> held_index_near(XrSession session, int hand) {
           ? index_bend(joints)
           : std::nullopt;
   if (!bend) return h.near[hand] = false, std::nullopt;
-  return h.near[hand] = bend_near(*bend, h.near[hand]);
+  return h.near[hand] = bend_near(*bend, h.near[hand], point_bend(pointing));
 }
 void forget_held_fingers(XrSession session) {
   auto& h = held();

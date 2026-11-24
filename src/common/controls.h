@@ -470,7 +470,7 @@ using Inputs = std::vector<std::string>;
 Offset mirrored(const Offset& offset);
 // How one hand's analog inputs and vibration reach the game, as SteamVR's binding
 // modes tune them (joystick dead zone and inversion, click thresholds, haptics).
-inline constexpr int kMaxDeadzone = 60, kMinPress = 5, kMaxPress = 95;
+inline constexpr int kMaxDeadzone = 60, kMinPress = 5, kMaxPress = 95, kMinPointing = 5, kMaxPointing = 80;
 struct Tuning {
   int deadzone = 0;  // % of the stick's travel ignored around its centre; the rest is stretched to full travel
   bool invert_x = false, invert_y = false;
@@ -478,6 +478,9 @@ struct Tuning {
   int grip_press = 0;     // % squeezed that presses the grip; 0: the runtime's own point
   bool vibration = true;
   int strength = 100;  // vibration strength, %
+  // % of the index finger's curl that still counts as pointing (finger poses,
+  // where the host measures the curl: xr::held_index_near); 0: Venture's own.
+  int pointing = 0;
   bool operator==(const Tuning&) const = default;
 };
 Tuning clamped(Tuning tuning);

@@ -271,14 +271,15 @@ std::uint64_t input_syncs = 0;  // protected by state().mutex
 std::array<std::array<venture::xr::GripLatch, controls::kQuestCount>, 2> toggles{};
 std::array<bool, 2> trigger_down{}, grip_down{};
 // Whether the host's controller skeleton has the index finger near the trigger,
-// read once per input sync, only where the controller has no proximity sensor.
-bool held_index(int hand, std::string_view profile) {
+// under the player's pointing dead zone, read once per input sync, only where
+// the controller has no proximity sensor.
+bool held_index(int hand, std::string_view profile, int pointing) {
   static std::array<std::uint64_t, 2> read{};  // protected by state().mutex
   static std::array<bool, 2> near{};
   if (read[std::size_t(hand)] != input_syncs) {
     read[std::size_t(hand)] = input_syncs;
     near[std::size_t(hand)] = !venture::xr::proximity_path(profile, false) &&
-                              venture::xr::held_index_near(session().handle, hand).value_or(false);
+                              venture::xr::held_index_near(session().handle, hand, pointing).value_or(false);
   }
   return near[std::size_t(hand)];
 }
@@ -506,7 +507,8 @@ std::int32_t vrapi_GetCurrentInputState(Mobile *mobile, std::uint32_t id, InputS
     // senses it, or it presses or moves an input there; the index also while the
     // host's controller skeleton has it curled toward the trigger (a hover).
     const bool index_near = (remote->touches & 0x40u) || button(i.near_index, hand) ||
-                            remote->trigger >= controls::kNearTrigger || held_index(hand, i.profile_names[hand]);
+                            remote->trigger >= controls::kNearTrigger ||
+                            held_index(hand, i.profile_names[hand], tuning.pointing);
     const bool thumb_near = (remote->touches & (0xFu | 0x20u | 0x1000u)) || button(i.near_thumb, hand) || a ||
                             b || click || std::hypot(remote->joystick.x, remote->joystick.y) >= controls::kNearStick;
     if (!index_near) remote->touches |= 0x200u;

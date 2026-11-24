@@ -960,8 +960,8 @@ TEST_CASE("Without proximity sensors, the inputs near them give an OpenXR game p
     CHECK_FALSE(game.pressed(near_thumb[hand], still));
     CHECK_FALSE(game.pressed(near_trigger[hand], still));
     const char* face = hand ? "/input/a/" : "/input/dpad_down/";  // the Quest's X/A: on the Frame's left, d-pad down
-    for (const std::string thumb : {std::string("/input/thumbstick/touch"), std::string(face) + "touch",
-                                    std::string(face) + "click"}) {
+    for (const auto& thumb : {std::string("/input/thumbstick/touch"), std::string(face) + "touch",
+                              std::string(face) + "click"}) {
       CAPTURE(thumb);
       MockXrScript script = still;
       press(hand ? script.right : script.left, thumb);
@@ -1120,13 +1120,26 @@ TEST_CASE("A controller skeleton's index bend says when the finger is near the t
   CHECK(*venture::xr::index_bend(joints) == doctest::Approx(90).epsilon(0.01));
   joints[XR_HAND_JOINT_INDEX_TIP_EXT].locationFlags = 0;
   CHECK_FALSE(venture::xr::index_bend(joints));
-  // Measured on the Steam Frame: ~13 degrees pointing, ~45 at 3 cm from the
-  // trigger, ~60 at 1 cm. A finger drifting around the edge keeps its state.
-  bool near = false;
-  for (const float bend : {13.f, 28.f, 45.f, 28.f, 26.f, 20.f, 28.f}) near = venture::xr::bend_near(bend, near);
-  CHECK_FALSE(near);
-  for (const float bend : {13.f, 60.f, 28.f, 25.f}) near = venture::xr::bend_near(bend, near);
+  // Logged on the Steam Frame (Robo Recall): 164 degrees resting on the trigger,
+  // 61 to 96 in a relaxed point just off it, 100 to 112 closing in on it, 12 to
+  // 22 pointing straight. Auto points in a relaxed point, and a finger closing
+  // in is near before it touches.
+  bool near = venture::xr::bend_near(164.f, false);
   CHECK(near);
+  for (const float bend : {70.f, 61.f, 78.f, 66.f, 12.f, 22.f}) {
+    CAPTURE(bend);
+    near = venture::xr::bend_near(bend, near);
+    CHECK_FALSE(near);
+  }
+  near = venture::xr::bend_near(85.f, near);
+  CHECK_FALSE(near);
+  near = venture::xr::bend_near(100.f, near);
+  CHECK(near);
+  // At the edge it keeps its state: back from the trigger to 85 is still near.
+  CHECK(venture::xr::bend_near(85.f, true));
+  // A tighter dead zone of the player's: at 30 % a relaxed point counts as near.
+  CHECK(venture::xr::bend_near(70.f, false, venture::xr::point_bend(30)));
+  CHECK_FALSE(venture::xr::bend_near(45.f, false, venture::xr::point_bend(30)));
 }
 
 TEST_CASE("A game's Touch, Touch Plus and Touch Pro suggestions all stay bound, reported as a Quest 3's controller") {

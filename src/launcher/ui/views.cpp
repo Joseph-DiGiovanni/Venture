@@ -6372,8 +6372,12 @@ void App::draw_controls_editor(ControlsEdit& e, const ControlsEdit* base, float 
         {tr("Stick dead zone"), Kind::percent}, {tr("Invert stick left/right"), Kind::check},
         {tr("Invert stick up/down"), Kind::check},
         // i18n: Controls page rows: how far the trigger or grip is pulled before it counts as pressed.
-        {tr("Trigger press at"), Kind::percent}, {tr("Grip press at"), Kind::percent}, {tr("Vibration"), Kind::percent},
+        {tr("Trigger press at"), Kind::percent}, {tr("Grip press at"), Kind::percent},
+        // i18n: Controls page row: how far the index finger can curl and still point in games (hand poses).
+        {tr("Pointing dead zone"), Kind::percent}, {tr("Vibration"), Kind::percent},
     };
+    // The stick's three rows, then the triggers', pointing and vibration.
+    constexpr int kRows[2]{3, 4};
     const float label_w = cards_label_w;
     const float field_w = s(108), col_gap = s(14);
     const float col = field_w + col_gap;
@@ -6386,15 +6390,15 @@ void App::draw_controls_editor(ControlsEdit& e, const ControlsEdit* base, float 
     bool changed = false;
     for (int block = 0; block < 2; ++block) {
       const float bx = at.x + (side ? block * (block_w + s(40)) : 0);
-      const float by = at.y + (side ? 0 : block * (head + 3 * s(46) + s(10)));
+      const float by = at.y + (side ? 0 : block * (head + kRows[0] * s(46) + s(10)));
       for (int hand = 0; hand < hands && hands > 1; ++hand) {
         const char* name = hand ? tr("Right") : tr("Left");
         draw_text(dl, fonts().semibold, kSmall + 1,
                   {std::round(bx + label_w + hand * col + (field_w - measure(fonts().semibold, kSmall + 1, name).x) * 0.5f), by},
                   color::text2, name);
       }
-      for (int r = 0; r < 3; ++r) {
-        const int index = block * 3 + r;
+      for (int r = 0; r < kRows[block]; ++r) {
+        const int index = block * kRows[0] + r;
         const auto& f = fields[index];
         const float ry = by + head + r * s(46);
         draw_text(dl, fonts().regular, kBody, {bx, text_y(fonts().regular, kBody, ry, s(38))}, color::text, f.label);
@@ -6421,6 +6425,13 @@ void App::draw_controls_editor(ControlsEdit& e, const ControlsEdit* base, float 
                 }
                 break;
               }
+              case 5:
+                // i18n: Controls page: the pointing dead zone left to Venture.
+                if (number_field("##pointing", &t.pointing, 0, controls::kMaxPointing, field_w, "%", false, tr("Auto"))) {
+                  if (t.pointing) t.pointing = std::max(t.pointing, controls::kMinPointing);
+                  changed = true;
+                }
+                break;
               default: {
                 int shown = t.vibration ? t.strength : 0;
                 // i18n: Controls page: vibration turned off.
@@ -6439,7 +6450,8 @@ void App::draw_controls_editor(ControlsEdit& e, const ControlsEdit* base, float 
         }
       }
     }
-    const float rows_end = at.y + (side ? head + 3 * s(46) : 2 * (head + 3 * s(46)) + s(10));
+    const float rows_end =
+        at.y + (side ? head + kRows[1] * s(46) : head + kRows[0] * s(46) + s(10) + head + kRows[1] * s(46));
     ImGui::SetCursorScreenPos({at.x, rows_end + s(14)});
     // i18n: Controls page checkbox under "Sticks, triggers and vibration".
     if (checkbox("tuning-mirror", tr("Same for both hands"), &e.tuning_mirror, {}, true)) changed = true;

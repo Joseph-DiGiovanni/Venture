@@ -71,6 +71,7 @@ Tuning clamped(Tuning t) {
   t.trigger_press = press(t.trigger_press);
   t.grip_press = press(t.grip_press);
   t.strength = std::clamp(t.strength, 0, 100);
+  t.pointing = t.pointing ? std::clamp(t.pointing, kMinPointing, kMaxPointing) : 0;
   return t;
 }
 std::array<float, 2> shape_stick(const Tuning& t, float x, float y) {
@@ -418,6 +419,7 @@ std::string encode(const Config& config) {
       if (t.grip_press) h["gripPress"] = t.grip_press;
       if (!t.vibration) h["vibration"] = false;
       if (t.strength != 100) h["strength"] = t.strength;
+      if (t.pointing) h["pointing"] = t.pointing;
       tuning[hand ? "right" : "left"] = std::move(h);
     }
     if (!tuning.empty()) entry["tuning"] = std::move(tuning);
@@ -510,6 +512,7 @@ Config decode(std::string_view text) {
         number("gripPress", t.grip_press);
         flag("vibration", t.vibration);
         number("strength", t.strength);
+        number("pointing", t.pointing);
         choice.tuning[size_t(hand)] = clamped(t);
       }
     if (const auto toggles = entry.find("toggles"); toggles != entry.end() && toggles->is_array())
