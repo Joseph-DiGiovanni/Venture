@@ -1,6 +1,7 @@
 #include "core/xr_call_trace.h"
 #include "xr/menu_chord.h"
 #include "xr/grip_toggle.h"
+#include "xr/held_fingers.h"
 #include "xr/system_keyboard.h"
 #include "xr/stats_overlay.h"
 #include "common/first_frame_progress.h"
@@ -400,6 +401,7 @@ XrResult Session::destroy(SessionOwner requested) {
   reset_grip_session(handle);
   keyboard::reset_session(handle);
   stats_overlay::reset_session(handle);
+  forget_held_fingers(handle);
   if (host_waiter) {
     {
       std::lock_guard waiter_lock(host_waiter->mutex);

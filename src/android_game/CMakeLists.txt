@@ -72,7 +72,7 @@ add_library(venture_vrapi SHARED
   ${rt}/hle/vrapi/vrapi.cpp ${rt}/hle/vrapi/swapchain_common.cpp ${rt}/hle/vrapi/input.cpp ${rt}/hle/vrapi/haptics.cpp
   ${rt}/hle/vrapi/properties.cpp ${rt}/hle/vrapi/layers.cpp
   ${rt}/xr/session.cpp ${rt}/xr/sanitize.cpp ${rt}/xr/clock.cpp ${rt}/xr/reference_spaces.cpp ${rt}/xr/bindings.cpp ${rt}/xr/openvr_devices.cpp
-  ${rt}/xr/hands.cpp ${rt}/xr/haptic_output.cpp ${rt}/xr/haptic_sequence.cpp ${rt}/xr/menu_chord.cpp
+  ${rt}/xr/hands.cpp ${rt}/xr/held_fingers.cpp ${rt}/xr/haptic_output.cpp ${rt}/xr/haptic_sequence.cpp ${rt}/xr/menu_chord.cpp
   ${rt}/xr/grip_toggle.cpp ${rt}/xr/display_override.cpp ${rt}/xr/display_memory.cpp ${rt}/xr/eye_scale.cpp
   ${rt}/platform/posix/xr_clock.cpp
   ${rt}/core/device_identity.cpp

@@ -7,6 +7,7 @@
 #include "xr/grip_toggle.h"
 #include "xr/haptic_output.h"
 #include "xr/haptic_sequence.h"
+#include "xr/held_fingers.h"
 #include "xr/menu_chord.h"
 #include "xr/system_keyboard.h"
 #include <algorithm>
@@ -37,13 +38,17 @@ enum Input : std::uint8_t {
   // controller has them, and only for a game that binds them.
   pro_thumbrest_force, pro_stylus_force, pro_trigger_curl, pro_trigger_slide, pro_thumb_proximity,
   pro_trigger_proximity, pro_haptic_trigger, pro_haptic_thumb, plus_thumb_proximity,
-  plus_trigger_proximity, plus_trigger_curl, plus_trigger_slide, plus_trigger_force, input_count
+  plus_trigger_proximity, plus_trigger_curl, plus_trigger_slide, plus_trigger_force,
+  // Any sensor under the thumb or the index finger (finger_bindings): what a
+  // game's proximity inputs follow where the host controller has no such sensor.
+  thumb_near, index_near, input_count
 };
 // How an input reaches the host. translated: touch_bindings (the player's
 // controls); profile: the same path, only on that host profile; palm: the
 // host's palm pose (XR_KHR_maintenance1 grip_surface, else XR_EXT_palm_pose).
-// pad: the pads controls::pads lists, without XR_EXT_dpad_binding.
-enum class Host : std::uint8_t { translated, pro, plus, proximity, palm, pad, none };
+// pad: the pads controls::pads lists, without XR_EXT_dpad_binding. fingers:
+// finger_bindings.
+enum class Host : std::uint8_t { translated, pro, plus, proximity, palm, pad, fingers, none };
 struct Fixed {
   const char* name;
   const char* label;
@@ -94,6 +99,8 @@ constexpr Fixed kInputs[input_count]{
     {"plus_trigger_curl", "Trigger curl (Touch Plus)", kFloat, "/input/trigger/curl_meta", "/input/trigger/curl_meta", Host::plus},
     {"plus_trigger_slide", "Trigger slide (Touch Plus)", kFloat, "/input/trigger/slide_meta", "/input/trigger/slide_meta", Host::plus},
     {"plus_trigger_force", "Trigger force (Touch Plus)", kFloat, "/input/trigger/force", "/input/trigger/force", Host::plus},
+    {"thumb_near", "Thumb near", kBool, "", "", Host::fingers},
+    {"index_near", "Index finger near", kBool, "", "", Host::fingers},
 };
 constexpr std::string_view kTouch = "/interaction_profiles/oculus/touch_controller";
 constexpr std::string_view kPlus = "/interaction_profiles/meta/touch_controller_plus";
@@ -353,6 +360,14 @@ void build_plans() {
   };
   use(L.quest);
   for (const auto& [path, plan] : L.plans) use(plan);
+  // A game's proximity input may be worked out from the inputs around the
+  // sensor (near_proximity), so those are read too.
+  if (L.used[pro_trigger_proximity] || L.used[plus_trigger_proximity])
+    for (const auto i : {trigger_touch, trigger, index_near}) L.used[i] = true;
+  if (L.used[pro_thumb_proximity] || L.used[plus_thumb_proximity])
+    for (const auto i : {stick, stick_click, stick_touch, primary, primary_touch, secondary, secondary_touch,
+                         thumbrest_touch, thumb_near})
+      L.used[i] = true;
   L.used[pad] = L.used[pad_press] = !venture::xr::host_dpad();
   // The direction buttons push a stick the game reads.
   for (const auto direction : {stick_up, stick_down, stick_left, stick_right})
@@ -368,7 +383,8 @@ const Plan& plan_for(int hand) {
   const auto it = L.plans.find(L.profiles[std::size_t(hand)]);
   return it == L.plans.end() ? L.quest : it->second;
 }
-// The optional inputs (palm pose, Pro and Plus sensors) the game's Quest bindings use.
+// The optional inputs (palm pose, Pro and Plus sensors) the game's Quest bindings
+// use, with the finger sensors its proximity inputs may follow (near_proximity).
 std::set<Input> optional_inputs() {
   std::set<Input> result;
   auto& L = layer();
@@ -383,6 +399,8 @@ std::set<Input> optional_inputs() {
         result.insert(source->input);
     }
   }
+  if (result.contains(pro_thumb_proximity) || result.contains(plus_thumb_proximity)) result.insert(thumb_near);
+  if (result.contains(pro_trigger_proximity) || result.contains(plus_trigger_proximity)) result.insert(index_near);
   return result;
 }
 
@@ -461,6 +479,13 @@ XrAction own_action(XrAction guest) {
   venture::xr::register_menu_action(set.host, action.host);
   return action.host;
 }
+// The host controller's own proximity sensor for `input` (proximity_path), or
+// null where the controller has none.
+const char* proximity_sensor(Input input, std::string_view target) {
+  const bool thumb = input == pro_thumb_proximity || input == plus_thumb_proximity;
+  if (!thumb && input != pro_trigger_proximity && input != plus_trigger_proximity) return nullptr;
+  return venture::xr::proximity_path(target, thumb);
+}
 std::vector<XrActionSuggestedBinding> fixed_bindings(const std::string& target, bool with_optional) {
   auto& L = layer();
   std::vector<XrActionSuggestedBinding> bindings;
@@ -471,6 +496,11 @@ std::vector<XrActionSuggestedBinding> fixed_bindings(const std::string& target, 
     const auto& fixed = kInputs[i];
     if (fixed.host != Host::translated && fixed.host != Host::pad && !(with_optional && L.optional.contains(Input(i)))) continue;
     for (int hand = 0; hand < 2; ++hand) {
+      if (fixed.host == Host::fingers) {
+        for (const auto& path : venture::xr::finger_bindings(target, hand, i == thumb_near))
+          if (const auto host = to_path(path)) bindings.push_back({L.host[std::size_t(i)], host});
+        continue;
+      }
       const char* suffix = hand ? fixed.right : fixed.left;
       if (!*suffix) continue;
       const std::string root = kHandRoots[hand];
@@ -478,13 +508,16 @@ std::vector<XrActionSuggestedBinding> fixed_bindings(const std::string& target, 
       switch (fixed.host) {
         case Host::translated: paths = touch_bindings(root + suffix, target); break;
         case Host::pro: if (target == kPro) paths.push_back(root + suffix); break;
-        case Host::plus: if (target == kPlus) paths.push_back(root + suffix); break;
+        case Host::plus:
+          if (target == kPlus) paths.push_back(root + suffix);
+          else if (const char* sensor = proximity_sensor(Input(i), target)) paths.push_back(root + sensor);
+          break;
         case Host::proximity:
-          if (target == kPro || (target == kTouch && extensions.contains("XR_FB_touch_controller_proximity")))
-            paths.push_back(root + suffix);
+          if (const char* sensor = proximity_sensor(Input(i), target)) paths.push_back(root + sensor);
           break;
         case Host::palm: if (palm) paths.push_back(root + palm); break;
         case Host::pad: paths = venture::xr::pad_bindings(target, hand, i == pad_press); break;
+        case Host::fingers:
         case Host::none: break;
       }
       // A Pro or Plus sensor also takes the inputs of the player's row for it, on any host.
@@ -739,6 +772,53 @@ void shape_inputs(XrTime now) {
         if (latch.time) in[target].changed = latch.time;
       }
     }
+  }
+}
+// A Quest controller senses a finger hovering near the trigger or the thumb area.
+// Where the host controller has no such sensor and the player mapped nothing to
+// it in their controls, the game's proximity inputs are worked out here instead:
+// a finger is near while it touches, presses or moves an input in that area, or,
+// for the index finger, while the host's controller skeleton has it curled
+// toward the trigger (held_index_near: a hover the inputs cannot see).
+void near_proximity() {
+  auto& L = layer();
+  using venture::controls::Quest;
+  for (int hand = 0; hand < 2; ++hand) {
+    const auto& profile = L.profiles[std::size_t(hand)];
+    const auto bound = L.bound.find(profile);
+    const auto r = venture::xr::resolved_controls(name_of(profile));
+    if (bound == L.bound.end() || !r) continue;
+    auto& in = L.inputs[std::size_t(hand)];
+    const auto near = [&](Quest row, std::initializer_list<Input> proximity, std::initializer_list<Input> from,
+                          const auto& value) {
+      if (!r->rows[std::size_t(hand)][std::size_t(row)].empty()) return;
+      std::optional<bool> now;
+      for (const auto p : proximity) {
+        if (!L.used[p] || (bound->second[p] & (hand ? 2 : 1))) continue;
+        if (!now) now = value();
+        auto& out = in[p];
+        out = {};
+        for (const auto s : from)
+          if (in[s].active) out.active = true, out.changed = std::max(out.changed, in[s].changed);
+        out.value = *now ? 1.f : 0.f;
+      }
+    };
+    const auto on = [&](Input i) { return in[i].active && in[i].value > 0.5f; };
+    near(Quest::trigger_proximity, {pro_trigger_proximity, plus_trigger_proximity}, {trigger_touch, trigger, index_near},
+         [&] {
+           return on(trigger_touch) || on(index_near) ||
+                  (in[trigger].active && in[trigger].value >= venture::controls::kNearTrigger) ||
+                  venture::xr::held_index_near(L.session, hand).value_or(false);
+         });
+    near(Quest::thumb_proximity, {pro_thumb_proximity, plus_thumb_proximity},
+         {stick, stick_click, stick_touch, primary, primary_touch, secondary, secondary_touch, thumbrest_touch,
+          thumb_near},
+         [&] {
+           return on(stick_touch) || on(stick_click) || on(primary) || on(primary_touch) || on(secondary) ||
+                  on(secondary_touch) || on(thumbrest_touch) || on(thumb_near) ||
+                  (in[stick].active &&
+                   std::hypot(in[stick].vector.x, in[stick].vector.y) >= venture::controls::kNearStick);
+         });
   }
 }
 // OpenXR's combination of several bound inputs: a boolean is pressed by any, a
@@ -1379,6 +1459,7 @@ XrResult xrSyncActions(XrSession session, const XrActionsSyncInfo* info) {
       read_inputs(session);
       split_pads();
       shape_inputs(now);
+      near_proximity();
     }
     else L.inputs = {};
     if (venture::xr::keyboard::shown()) [[unlikely]] {

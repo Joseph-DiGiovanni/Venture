@@ -29,6 +29,16 @@ bool host_dpad();
 // halves of on `profile` ("/user/hand/left/input/trackpad"), and their presses,
 // for a pad action and a press action that split_pad reads.
 std::vector<std::string> pad_bindings(std::string_view profile, int hand, bool press);
+// The proximity sensor host profile `profile` has for the thumb or the index
+// finger ("/input/thumb_meta/proximity_meta"), or null where its controller
+// has none: Touch Plus, Touch Pro, and Touch with XR_FB_touch_controller_proximity.
+const char* proximity_path(std::string_view profile, bool thumb);
+// The host paths that sense a finger of `hand` in one area of `profile`'s
+// controller, for finger poses: every touch sensor under the thumb (buttons,
+// stick, pad, thumb rest) or under the index finger (trigger, bumper), and the
+// controller's proximity sensor there. Where the fingers physically are,
+// whatever the player's controls map those inputs to.
+std::vector<std::string> finger_bindings(std::string_view profile, int hand, bool thumb);
 // The Quest rows of one hand a pad's halves press: the pad at `at`, pressed or
 // not. All false with XR_EXT_dpad_binding (the host binds the halves).
 std::array<bool, controls::kQuestCount> split_pad(std::string_view profile, int hand, XrVector2f at, bool pressed);

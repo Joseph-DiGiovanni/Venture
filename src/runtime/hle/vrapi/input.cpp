@@ -8,6 +8,7 @@
 #include "hle/vrapi/state.h"
 #include "xr/bindings.h"
 #include "xr/hands.h"
+#include "xr/held_fingers.h"
 #include "xr/clock.h"
 #include "xr/system_keyboard.h"
 #include "core/wait.h"
@@ -122,6 +123,9 @@ XrResult initialize_input() {
       // Bound below, only where the player's controls use pad halves the host cannot bind.
       {&input.pad, "trackpad", XR_ACTION_TYPE_VECTOR2F_INPUT, nullptr, nullptr},
       {&input.pad_press, "trackpad_press", XR_ACTION_TYPE_BOOLEAN_INPUT, nullptr, nullptr},
+      // Bound below to every sensor in the finger's area (finger_bindings).
+      {&input.near_thumb, "near_thumb", XR_ACTION_TYPE_BOOLEAN_INPUT, nullptr, nullptr},
+      {&input.near_index, "near_index", XR_ACTION_TYPE_BOOLEAN_INPUT, nullptr, nullptr},
   };
   for (auto &spec : specs) {
     XrActionCreateInfo ci{XR_TYPE_ACTION_CREATE_INFO};
@@ -162,13 +166,20 @@ XrResult initialize_input() {
             bindings.push_back({*spec.handle, path});
         }
       }
-    for (int hand = 0; hand < 2; ++hand)
+    for (int hand = 0; hand < 2; ++hand) {
       for (const bool press : {false, true})
         for (const auto &mapped : venture::xr::pad_bindings(profile, hand, press)) {
           XrPath path{};
           if (XR_SUCCEEDED(::xrStringToPath(instance, mapped.c_str(), &path)))
             bindings.push_back({press ? input.pad_press : input.pad, path});
         }
+      for (const bool thumb : {false, true})
+        for (const auto &mapped : venture::xr::finger_bindings(profile, hand, thumb)) {
+          XrPath path{};
+          if (XR_SUCCEEDED(::xrStringToPath(instance, mapped.c_str(), &path)))
+            bindings.push_back({thumb ? input.near_thumb : input.near_index, path});
+        }
+    }
     XrInteractionProfileSuggestedBinding bi{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
     ::xrStringToPath(instance, profile.c_str(), &bi.interactionProfile);
     auto suggested = venture::xr::suggest_translated(instance, bi.interactionProfile, std::move(bindings));
@@ -259,6 +270,18 @@ namespace {
 std::uint64_t input_syncs = 0;  // protected by state().mutex
 std::array<std::array<venture::xr::GripLatch, controls::kQuestCount>, 2> toggles{};
 std::array<bool, 2> trigger_down{}, grip_down{};
+// Whether the host's controller skeleton has the index finger near the trigger,
+// read once per input sync, only where the controller has no proximity sensor.
+bool held_index(int hand, std::string_view profile) {
+  static std::array<std::uint64_t, 2> read{};  // protected by state().mutex
+  static std::array<bool, 2> near{};
+  if (read[std::size_t(hand)] != input_syncs) {
+    read[std::size_t(hand)] = input_syncs;
+    near[std::size_t(hand)] = !venture::xr::proximity_path(profile, false) &&
+                              venture::xr::held_index_near(session().handle, hand).value_or(false);
+  }
+  return near[std::size_t(hand)];
+}
 } // namespace
 XrResult sync_input() {
   ++input_syncs;
@@ -375,7 +398,7 @@ std::int32_t vrapi_GetInputDeviceCapabilities(Mobile *mobile, InputHeader *out) 
     caps->haptic_ms = 4;
     caps->buttons =
         0x20000000 | 0x04000000 | 0x80000000 | (id == 1 ? 0x100 | 0x200 | 0x100000 : 1 | 2);
-    caps->touches = 0x40 | 0x20 | (id == 1 ? 4 | 8 : 1 | 2);
+    caps->touches = 0x40 | 0x20 | 0x100 | 0x200 | (id == 1 ? 4 | 8 : 1 | 2);
     return success;
   }
   if (out->type == 32 && id >= 3 && id <= 4 && state().input.hands_supported) {
@@ -399,9 +422,11 @@ std::int32_t vrapi_GetCurrentInputState(Mobile *mobile, std::uint32_t id, InputS
     if (!active(hand))
       return no_device;
     // The open system keyboard has the controllers: the game sees them at rest,
-    // still connected and tracked, as on a Quest.
+    // still connected and tracked, as on a Quest: nothing pressed, fingers off
+    // every input.
     if (venture::xr::keyboard::shown()) [[unlikely]] {
       remote->recenter = std::uint8_t(state().recenter_count);
+      remote->touches = 0x300u;
       return success;
     }
     // Pad halves the host cannot bind, split here from the pad and its press.
@@ -474,6 +499,18 @@ std::int32_t vrapi_GetCurrentInputState(Mobile *mobile, std::uint32_t id, InputS
       remote->joystick = {shaped[0], shaped[1]};
       remote->touches |= 0x20u;
     }
+    // Hand poses VrApi games read: ovrTouch_IndexPointing (index finger away from
+    // the trigger) and ovrTouch_ThumbUp (thumb away from the buttons, stick and
+    // thumb rest). A Quest sets them from proximity sensors, as here where the
+    // controller has them. Elsewhere a finger is near while any sensor in its area
+    // senses it, or it presses or moves an input there; the index also while the
+    // host's controller skeleton has it curled toward the trigger (a hover).
+    const bool index_near = (remote->touches & 0x40u) || button(i.near_index, hand) ||
+                            remote->trigger >= controls::kNearTrigger || held_index(hand, i.profile_names[hand]);
+    const bool thumb_near = (remote->touches & (0xFu | 0x20u | 0x1000u)) || button(i.near_thumb, hand) || a ||
+                            b || click || std::hypot(remote->joystick.x, remote->joystick.y) >= controls::kNearStick;
+    if (!index_near) remote->touches |= 0x200u;
+    if (!thumb_near) remote->touches |= 0x100u;
     if (av::enabled()) {
       using Clock = std::chrono::steady_clock;
       static std::array<Clock::time_point, 2> reported{}; // protected by state().mutex

@@ -12,6 +12,7 @@
 #include "xr/bindings.h"
 #include "xr/host_xr.h"
 #include "xr/haptic_sequence.h"
+#include "xr/held_fingers.h"
 #include "xr/grip_toggle.h"
 #include "xr/menu_chord.h"
 #include "xr_images_fixture.h"
@@ -938,6 +939,194 @@ TEST_CASE("Touch Pro and Touch Plus rows give an OpenXR game those sensors from 
   CHECK(game.pressed(near_trigger, script));
   CHECK(value(curl) == doctest::Approx(0.6f));  // the analog trigger's own value
   CHECK(value(stylus) == doctest::Approx(1));   // a button, all the way
+}
+
+TEST_CASE("Without proximity sensors, the inputs near them give an OpenXR game proximity on both hands") {
+  venture::test::ScopedMenuMode automatic("");
+  ScopedControls defaults("");
+  OpenXrGame game("/interaction_profiles/valve/frame_controller_valve");
+  const XrAction near_thumb[2]{game.action("near_thumb_left"), game.action("near_thumb_right")};
+  const XrAction near_trigger[2]{game.action("near_trigger_left"), game.action("near_trigger_right")};
+  REQUIRE(game.suggest("/interaction_profiles/meta/touch_controller_plus",
+                       {{near_thumb[0], game.path("/user/hand/left/input/thumb_meta/proximity_meta")},
+                        {near_trigger[0], game.path("/user/hand/left/input/trigger/proximity_meta")},
+                        {near_thumb[1], game.path("/user/hand/right/input/thumb_meta/proximity_meta")},
+                        {near_trigger[1], game.path("/user/hand/right/input/trigger/proximity_meta")}}) == XR_SUCCESS);
+  game.start();
+  MockXrScript still{};
+  still.trigger = 0;  // trigger released: the mock rests it at 0.25, which counts as touching it
+  for (int hand = 0; hand < 2; ++hand) {
+    CAPTURE(hand);
+    CHECK_FALSE(game.pressed(near_thumb[hand], still));
+    CHECK_FALSE(game.pressed(near_trigger[hand], still));
+    const char* face = hand ? "/input/a/" : "/input/dpad_down/";  // the Quest's X/A: on the Frame's left, d-pad down
+    for (const std::string thumb : {std::string("/input/thumbstick/touch"), std::string(face) + "touch",
+                                    std::string(face) + "click"}) {
+      CAPTURE(thumb);
+      MockXrScript script = still;
+      press(hand ? script.right : script.left, thumb);
+      CHECK(game.pressed(near_thumb[hand], script));
+      CHECK_FALSE(game.pressed(near_thumb[1 - hand], script));
+      CHECK_FALSE(game.pressed(near_trigger[hand], script));
+    }
+    MockXrScript script = still;
+    (hand ? script.right : script.left).thumbstick = {0.6f, 0};
+    CHECK(game.pressed(near_thumb[hand], script));
+    script = still;
+    press(hand ? script.right : script.left, "/input/trigger/touch");
+    CHECK(game.pressed(near_trigger[hand], script));
+    CHECK_FALSE(game.pressed(near_trigger[1 - hand], script));
+    CHECK_FALSE(game.pressed(near_thumb[hand], script));
+    // The Frame's thumb sensors no Quest input stands for, and its bumper under the index finger.
+    const auto others = hand ? std::vector<const char*>{"/input/x/touch", "/input/y/touch", "/input/menu/touch"}
+                             : std::vector<const char*>{"/input/dpad_left/touch", "/input/dpad_right/touch",
+                                                        "/input/view/touch"};
+    for (const char* thumb : others) {
+      CAPTURE(thumb);
+      script = still;
+      press(hand ? script.right : script.left, thumb);
+      CHECK(game.pressed(near_thumb[hand], script));
+      CHECK_FALSE(game.pressed(near_trigger[hand], script));
+    }
+    script = still;
+    press(hand ? script.right : script.left, "/input/bumper/touch");
+    CHECK(game.pressed(near_trigger[hand], script));
+    CHECK_FALSE(game.pressed(near_thumb[hand], script));
+  }
+}
+
+TEST_CASE("An OpenXR game's proximity keeps a host's own sensor and the player's row over the inputs near it") {
+  venture::test::ScopedMenuMode automatic("");
+  MockXrScript still{};
+  still.trigger = 0;
+  SUBCASE("Touch Pro's sensor answers a Touch Plus binding") {
+    ScopedControls defaults("");
+    OpenXrGame game("/interaction_profiles/facebook/touch_controller_pro");
+    const XrAction near_thumb = game.action("near_thumb");
+    REQUIRE(game.suggest("/interaction_profiles/meta/touch_controller_plus",
+                         {{near_thumb, game.path("/user/hand/right/input/thumb_meta/proximity_meta")}}) == XR_SUCCESS);
+    game.start();
+    MockXrScript script = still;
+    press(script.right, "/input/thumbstick/touch");
+    CHECK_FALSE(game.pressed(near_thumb, script));
+    script = still;
+    press(script.right, "/input/thumb_fb/proximity_fb");
+    CHECK(game.pressed(near_thumb, script));
+  }
+  SUBCASE("the player's row") {
+    Config config;
+    config["/interaction_profiles/valve/frame_controller_valve"].rows[1][int(Quest::thumb_proximity)] =
+        Inputs{"/input/bumper/click"};
+    ScopedControls controls(encode(config));
+    OpenXrGame game("/interaction_profiles/valve/frame_controller_valve");
+    const XrAction near_thumb = game.action("near_thumb");
+    REQUIRE(game.suggest("/interaction_profiles/meta/touch_controller_plus",
+                         {{near_thumb, game.path("/user/hand/right/input/thumb_meta/proximity_meta")}}) == XR_SUCCESS);
+    game.start();
+    MockXrScript script = still;
+    press(script.right, "/input/thumbstick/touch");
+    CHECK_FALSE(game.pressed(near_thumb, script));
+    script = still;
+    press(script.right, "/input/bumper/click");
+    CHECK(game.pressed(near_thumb, script));
+  }
+}
+
+TEST_CASE("A VrApi game's index pointing and thumb up follow the host's touches, presses and stick") {
+  venture::test::ScopedMenuMode automatic("");
+  constexpr std::uint32_t kThumbUp = 0x100u, kPointing = 0x200u;
+  MockXrScript still{};
+  still.trigger = 0;  // trigger released: the mock rests it at 0.25, which counts as touching it
+  auto pose = [](const vr::abi::RemoteState& state) { return state.touches & (kThumbUp | kPointing); };
+  SUBCASE("Steam Frame, both hands") {
+    ScopedControls defaults("");
+    VrApiGame game("/interaction_profiles/valve/frame_controller_valve");
+    for (int hand = 0; hand < 2; ++hand) {
+      CAPTURE(hand);
+      CHECK(pose(game.read(still, hand)) == (kThumbUp | kPointing));
+      MockXrScript script = still;
+      press(hand ? script.right : script.left, "/input/trigger/touch");
+      CHECK(pose(game.read(script, hand)) == kThumbUp);
+      const char* face = hand ? "/input/a/touch" : "/input/dpad_down/touch";  // the Quest's X/A, as above
+      for (const char* thumb : {"/input/thumbstick/touch", face}) {
+        CAPTURE(thumb);
+        script = still;
+        press(hand ? script.right : script.left, thumb);
+        CHECK(pose(game.read(script, hand)) == kPointing);
+      }
+      // The Frame's thumb sensors no Quest input stands for, and its bumper under the index finger.
+      const auto others = hand ? std::vector<const char*>{"/input/x/touch", "/input/y/touch", "/input/menu/touch"}
+                               : std::vector<const char*>{"/input/dpad_left/touch", "/input/dpad_right/touch",
+                                                          "/input/view/touch"};
+      for (const char* thumb : others) {
+        CAPTURE(thumb);
+        script = still;
+        press(hand ? script.right : script.left, thumb);
+        CHECK(pose(game.read(script, hand)) == kPointing);
+      }
+      script = still;
+      press(hand ? script.right : script.left, "/input/bumper/touch");
+      CHECK(pose(game.read(script, hand)) == kThumbUp);
+    }
+  }
+  SUBCASE("a stick direction row") {
+    Config config;
+    config["/interaction_profiles/valve/frame_controller_valve"].rows[1][int(Quest::stick_up)] =
+        Inputs{"/input/bumper/click"};
+    ScopedControls controls(encode(config));
+    VrApiGame frame("/interaction_profiles/valve/frame_controller_valve");
+    MockXrScript script = still;
+    press(script.right, "/input/bumper/click");
+    CHECK(pose(frame.read(script, 1)) == kPointing);
+  }
+  SUBCASE("Index thumb rest") {
+    ScopedControls defaults("");
+    VrApiGame index("/interaction_profiles/valve/index_controller");
+    MockXrScript script = still;
+    press(script.right, "/input/trackpad/touch");
+    const auto state = index.read(script, 1);
+    CHECK((state.touches & 0x1000u) != 0);
+    CHECK(pose(state) == kPointing);
+  }
+  SUBCASE("a controller without touch sensors") {
+    ScopedControls defaults("");
+    VrApiGame game("/interaction_profiles/hp/mixed_reality_controller");
+    CHECK(pose(game.read(still, 1)) == (kThumbUp | kPointing));
+    MockXrScript script = still;
+    script.right.trigger = 0.6f;
+    CHECK(pose(game.read(script, 1)) == kThumbUp);
+    script = still;
+    press(script.right, "/input/a/click");
+    CHECK(pose(game.read(script, 1)) == kPointing);
+    script = still;
+    script.right.thumbstick = {0.6f, 0};
+    CHECK(pose(game.read(script, 1)) == kPointing);
+  }
+}
+
+TEST_CASE("A controller skeleton's index bend says when the finger is near the trigger, without flicker") {
+  XrHandJointLocationEXT joints[XR_HAND_JOINT_COUNT_EXT]{};
+  auto at = [&](XrHandJointEXT joint, XrVector3f position) {
+    joints[joint] = {XR_SPACE_LOCATION_POSITION_VALID_BIT, {{0, 0, 0, 1}, position}, 0.01f};
+  };
+  // Straight along -Z, then the last bone turned down: pointing, then curled 90 degrees.
+  at(XR_HAND_JOINT_INDEX_METACARPAL_EXT, {0, 0, 0});
+  at(XR_HAND_JOINT_INDEX_PROXIMAL_EXT, {0, 0, -0.06f});
+  at(XR_HAND_JOINT_INDEX_DISTAL_EXT, {0, 0, -0.10f});
+  at(XR_HAND_JOINT_INDEX_TIP_EXT, {0, 0, -0.12f});
+  REQUIRE(venture::xr::index_bend(joints));
+  CHECK(*venture::xr::index_bend(joints) == doctest::Approx(0).epsilon(0.01));
+  at(XR_HAND_JOINT_INDEX_TIP_EXT, {0, -0.02f, -0.10f});
+  CHECK(*venture::xr::index_bend(joints) == doctest::Approx(90).epsilon(0.01));
+  joints[XR_HAND_JOINT_INDEX_TIP_EXT].locationFlags = 0;
+  CHECK_FALSE(venture::xr::index_bend(joints));
+  // Measured on the Steam Frame: ~13 degrees pointing, ~45 at 3 cm from the
+  // trigger, ~60 at 1 cm. A finger drifting around the edge keeps its state.
+  bool near = false;
+  for (const float bend : {13.f, 28.f, 45.f, 28.f, 26.f, 20.f, 28.f}) near = venture::xr::bend_near(bend, near);
+  CHECK_FALSE(near);
+  for (const float bend : {13.f, 60.f, 28.f, 25.f}) near = venture::xr::bend_near(bend, near);
+  CHECK(near);
 }
 
 TEST_CASE("A game's Touch, Touch Plus and Touch Pro suggestions all stay bound, reported as a Quest 3's controller") {

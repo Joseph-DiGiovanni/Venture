@@ -128,6 +128,31 @@ std::vector<std::string> pad_bindings(std::string_view profile, int hand, bool p
     out.push_back(std::string(controls::hand_root(hand)) + (press ? pad.press : pad.axes));
   return out;
 }
+const char* proximity_path(std::string_view profile, bool thumb) {
+  if (profile == "/interaction_profiles/meta/touch_controller_plus")
+    return thumb ? "/input/thumb_meta/proximity_meta" : "/input/trigger/proximity_meta";
+  if (profile == "/interaction_profiles/facebook/touch_controller_pro" ||
+      (profile == "/interaction_profiles/oculus/touch_controller" &&
+       host_xr().enabled_extensions.contains("XR_FB_touch_controller_proximity")))
+    return thumb ? "/input/thumb_fb/proximity_fb" : "/input/trigger/proximity_fb";
+  return nullptr;
+}
+std::vector<std::string> finger_bindings(std::string_view profile, int hand, bool thumb) {
+  std::vector<std::string> out;
+  const auto* p = controls::find_profile(profile);
+  if (!p) return out;
+  const std::string root(controls::hand_root(hand));
+  for (const auto& input : p->inputs) {
+    const auto& path = input.path;
+    if (!path.ends_with("/touch") || input.reserved || !controls::on_hand(input, hand) ||
+        path.starts_with("/input/squeeze"))
+      continue;
+    const bool index = path.starts_with("/input/trigger") || path.starts_with("/input/bumper");
+    if (index != thumb) out.push_back(root + std::string(path));
+  }
+  if (const char* sensor = proximity_path(profile, thumb)) out.push_back(root + sensor);
+  return out;
+}
 std::array<bool, controls::kQuestCount> split_pad(std::string_view profile, int hand, XrVector2f at, bool pressed) {
   std::array<bool, controls::kQuestCount> out{};
   if (!pressed || host_dpad()) return out;

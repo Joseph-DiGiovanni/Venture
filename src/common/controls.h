@@ -36,6 +36,10 @@ inline constexpr bool is_direction(Quest q) { return q >= Quest::stick_up && q <
 inline constexpr bool is_extra(Quest q) { return q >= Quest::stick_touch; }
 // A Touch Pro or Touch Plus sensor's row.
 inline constexpr bool is_pro_plus(Quest q) { return q >= Quest::thumb_proximity; }
+// Finger poses on controllers without proximity sensors: a finger counts as near
+// the trigger once it is pulled this far, and near the stick once it is tilted
+// this far (0 to 1).
+inline constexpr float kNearTrigger = 0.1f, kNearStick = 0.1f;
 // The extra row whose buttons also touch a Touch input (stick, X/A, Y/B, trigger), or Quest::count.
 inline constexpr Quest touch_row(Quest q) {
   return q == Quest::stick ? Quest::stick_touch
